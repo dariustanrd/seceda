@@ -26,6 +26,7 @@
                 "SECEDA_BUILD_EXECUTORCH": "ON",
                 "SECEDA_BUILD_CUSTOM": "ON",
                 "SECEDA_ENABLE_VULKAN": "OFF",
+                "SECEDA_ENABLE_METAL": "OFF",
                 "SECEDA_ENABLE_XNNPACK": "ON",
                 "SECEDA_ENABLE_OPENMP": "ON"
             }
@@ -41,8 +42,66 @@
                 "SECEDA_BUILD_EXECUTORCH": "ON",
                 "SECEDA_BUILD_CUSTOM": "ON",
                 "SECEDA_ENABLE_VULKAN": "OFF",
+                "SECEDA_ENABLE_METAL": "OFF",
                 "SECEDA_ENABLE_XNNPACK": "ON",
                 "SECEDA_ENABLE_OPENMP": "ON"
+            }
+        },
+        {
+            "name": "apple-silicon-base",
+            "hidden": true,
+            "inherits": "base",
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Darwin"
+            },
+            "cacheVariables": {
+                "CMAKE_OSX_ARCHITECTURES": "arm64",
+                "SECEDA_LLAMA_CPU_AARCH64": "ON",
+                "SECEDA_ENABLE_VULKAN": "OFF",
+                "SECEDA_ENABLE_METAL": "ON",
+                "SECEDA_ENABLE_XNNPACK": "ON",
+                "SECEDA_ENABLE_OPENMP": "OFF",
+                "SECEDA_EXECUTORCH_ENABLE_APPLE": "ON",
+                "SECEDA_EXECUTORCH_ENABLE_METAL": "OFF"
+            }
+        },
+        {
+            "name": "apple-silicon-debug",
+            "displayName": "Apple Silicon Debug",
+            "description": "Build for Apple Silicon with llama.cpp Metal and ExecuTorch CoreML/MPS",
+            "inherits": "apple-silicon-base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "SECEDA_BUILD_LLAMA_CPP": "ON",
+                "SECEDA_BUILD_EXECUTORCH": "ON",
+                "SECEDA_BUILD_CUSTOM": "ON"
+            }
+        },
+        {
+            "name": "apple-silicon-release",
+            "displayName": "Apple Silicon Release",
+            "description": "Build for Apple Silicon with llama.cpp Metal and ExecuTorch CoreML/MPS",
+            "inherits": "apple-silicon-base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "SECEDA_BUILD_LLAMA_CPP": "ON",
+                "SECEDA_BUILD_EXECUTORCH": "ON",
+                "SECEDA_BUILD_CUSTOM": "ON"
+            }
+        },
+        {
+            "name": "apple-silicon-metal-experimental",
+            "displayName": "Apple Silicon Metal Experimental",
+            "description": "Build for Apple Silicon with experimental ExecuTorch Metal enabled",
+            "inherits": "apple-silicon-base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "SECEDA_BUILD_LLAMA_CPP": "ON",
+                "SECEDA_BUILD_EXECUTORCH": "ON",
+                "SECEDA_BUILD_CUSTOM": "ON",
+                "SECEDA_EXECUTORCH_ENABLE_METAL": "ON"
             }
         },
         {
@@ -52,7 +111,10 @@
             "toolchainFile": "${sourceDir}/cmake/toolchains/aarch64-linux-gnu.cmake",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
-                "SECEDA_LLAMA_CPU_AARCH64": "ON"
+                "SECEDA_LLAMA_CPU_AARCH64": "ON",
+                "SECEDA_ENABLE_METAL": "OFF",
+                "SECEDA_EXECUTORCH_ENABLE_APPLE": "OFF",
+                "SECEDA_EXECUTORCH_ENABLE_METAL": "OFF"
             }
         },
         {
@@ -154,6 +216,36 @@
         {
             "name": "native-release",
             "configurePreset": "native-release",
+            "jobs": 0
+        },
+        {
+            "name": "apple-silicon-debug",
+            "configurePreset": "apple-silicon-debug",
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Darwin"
+            },
+            "jobs": 0
+        },
+        {
+            "name": "apple-silicon-release",
+            "configurePreset": "apple-silicon-release",
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Darwin"
+            },
+            "jobs": 0
+        },
+        {
+            "name": "apple-silicon-metal-experimental",
+            "configurePreset": "apple-silicon-metal-experimental",
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Darwin"
+            },
             "jobs": 0
         },
         {

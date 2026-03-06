@@ -173,6 +173,32 @@ cmake --build --preset native-release
 
 Use `native-debug` for local debugging.
 
+### Apple Silicon builds
+
+On macOS, use the Apple-specific presets instead of the generic native presets when you want Apple backend support wired in.
+
+Standard Apple Silicon build:
+
+```bash
+cmake --preset apple-silicon-release
+cmake --build --preset apple-silicon-release
+```
+
+Available Apple presets:
+
+* `apple-silicon-debug`
+* `apple-silicon-release`
+* `apple-silicon-metal-experimental`
+
+These presets target `arm64` and currently configure:
+
+* `llama.cpp` with Metal enabled
+* ExecuTorch with Apple support enabled via CoreML and MPS
+* OpenMP disabled by default to avoid requiring a separate `libomp` setup on macOS
+
+`apple-silicon-metal-experimental` additionally enables the ExecuTorch Metal backend.
+That backend is still considered experimental, so prefer `apple-silicon-release` unless you specifically want to evaluate it.
+
 ### Generic ARM64 cross-compilation
 
 The ARM presets are generic Linux ARM64 presets, not Telechips/Yocto-specific ones.

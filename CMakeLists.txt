@@ -18,6 +18,7 @@ option(SECEDA_BUILD_CUSTOM "Build custom code in src/" ON)
 
 # Backend options shared across downstream components
 option(SECEDA_ENABLE_VULKAN "Enable Vulkan backends where available" OFF)
+option(SECEDA_ENABLE_METAL "Enable Metal backend support where available" OFF)
 option(SECEDA_ENABLE_XNNPACK "Enable XNNPACK backend support" ON)
 option(SECEDA_ENABLE_OPENMP "Enable OpenMP support for llama.cpp" ON)
 
@@ -29,6 +30,8 @@ option(SECEDA_LLAMA_CPU_AARCH64 "Enable AArch64 CPU optimizations for llama.cpp"
 # ExecuTorch specific options
 option(SECEDA_EXECUTORCH_ENABLE_LLM "Enable ExecuTorch LLM extensions" ON)
 option(SECEDA_EXECUTORCH_ENABLE_QUANTIZED "Enable ExecuTorch quantized kernels" ON)
+option(SECEDA_EXECUTORCH_ENABLE_APPLE "Enable ExecuTorch Apple backends and extensions" OFF)
+option(SECEDA_EXECUTORCH_ENABLE_METAL "Enable experimental ExecuTorch Metal backend" OFF)
 
 set(SECEDA_ROOT_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 set(SECEDA_THIRDPARTY_DIR ${SECEDA_ROOT_DIR}/thirdparty)
@@ -49,6 +52,18 @@ if(SECEDA_BUILD_EXECUTORCH AND NOT EXISTS "${SECEDA_EXECUTORCH_DIR}/CMakeLists.t
         FATAL_ERROR
         "ExecuTorch submodule is missing. Run: git submodule update --init --recursive"
     )
+endif()
+
+if((SECEDA_ENABLE_METAL OR SECEDA_EXECUTORCH_ENABLE_APPLE OR SECEDA_EXECUTORCH_ENABLE_METAL) AND NOT APPLE)
+    message(
+        FATAL_ERROR
+        "Apple-specific build options require an Apple target. "
+        "Use the Apple presets on macOS or disable Metal/Apple flags."
+    )
+endif()
+
+if(SECEDA_EXECUTORCH_ENABLE_METAL)
+    message(WARNING "ExecuTorch Metal backend is experimental.")
 endif()
 
 # Detect cross-compilation and enable ARM64-specific optimizations when appropriate.
@@ -121,6 +136,12 @@ if(SECEDA_BUILD_LLAMA_CPP)
         list(APPEND LLAMA_CMAKE_ARGS -DGGML_VULKAN=OFF)
     endif()
 
+    if(SECEDA_ENABLE_METAL)
+        list(APPEND LLAMA_CMAKE_ARGS -DGGML_METAL=ON)
+    else()
+        list(APPEND LLAMA_CMAKE_ARGS -DGGML_METAL=OFF)
+    endif()
+
     if(SECEDA_LLAMA_ENABLE_KLEIDIAI)
         list(
             APPEND
@@ -187,6 +208,30 @@ if(SECEDA_BUILD_EXECUTORCH)
         list(APPEND EXECUTORCH_CMAKE_ARGS -DEXECUTORCH_BUILD_VULKAN=OFF)
     endif()
 
+    if(SECEDA_EXECUTORCH_ENABLE_APPLE)
+        list(
+            APPEND
+            EXECUTORCH_CMAKE_ARGS
+            -DEXECUTORCH_BUILD_COREML=ON
+            -DEXECUTORCH_BUILD_MPS=ON
+            -DEXECUTORCH_BUILD_EXTENSION_APPLE=ON
+        )
+    else()
+        list(
+            APPEND
+            EXECUTORCH_CMAKE_ARGS
+            -DEXECUTORCH_BUILD_COREML=OFF
+            -DEXECUTORCH_BUILD_MPS=OFF
+            -DEXECUTORCH_BUILD_EXTENSION_APPLE=OFF
+        )
+    endif()
+
+    if(SECEDA_EXECUTORCH_ENABLE_METAL)
+        list(APPEND EXECUTORCH_CMAKE_ARGS -DEXECUTORCH_BUILD_METAL=ON)
+    else()
+        list(APPEND EXECUTORCH_CMAKE_ARGS -DEXECUTORCH_BUILD_METAL=OFF)
+    endif()
+
     if(SECEDA_EXECUTORCH_ENABLE_LLM)
         list(
             APPEND
@@ -195,6 +240,12 @@ if(SECEDA_BUILD_EXECUTORCH)
             -DEXECUTORCH_BUILD_EXTENSION_LLM_RUNNER=ON
             -DEXECUTORCH_BUILD_KERNELS_LLM=ON
         )
+
+        if(SECEDA_EXECUTORCH_ENABLE_APPLE)
+            list(APPEND EXECUTORCH_CMAKE_ARGS -DEXECUTORCH_BUILD_EXTENSION_LLM_APPLE=ON)
+        else()
+            list(APPEND EXECUTORCH_CMAKE_ARGS -DEXECUTORCH_BUILD_EXTENSION_LLM_APPLE=OFF)
+        endif()
     else()
         list(
             APPEND
@@ -202,6 +253,7 @@ if(SECEDA_BUILD_EXECUTORCH)
             -DEXECUTORCH_BUILD_EXTENSION_LLM=OFF
             -DEXECUTORCH_BUILD_EXTENSION_LLM_RUNNER=OFF
             -DEXECUTORCH_BUILD_KERNELS_LLM=OFF
+            -DEXECUTORCH_BUILD_EXTENSION_LLM_APPLE=OFF
         )
     endif()
 
@@ -243,6 +295,7 @@ message(STATUS "  Custom code: ${SECEDA_BUILD_CUSTOM}")
 message(STATUS "")
 message(STATUS "Backends:")
 message(STATUS "  Vulkan: ${SECEDA_ENABLE_VULKAN}")
+message(STATUS "  Metal: ${SECEDA_ENABLE_METAL}")
 message(STATUS "  XNNPACK: ${SECEDA_ENABLE_XNNPACK}")
 message(STATUS "  OpenMP: ${SECEDA_ENABLE_OPENMP}")
 if(SECEDA_BUILD_LLAMA_CPP)
@@ -257,5 +310,7 @@ if(SECEDA_BUILD_EXECUTORCH)
     message(STATUS "ExecuTorch options:")
     message(STATUS "  LLM extensions: ${SECEDA_EXECUTORCH_ENABLE_LLM}")
     message(STATUS "  Quantized kernels: ${SECEDA_EXECUTORCH_ENABLE_QUANTIZED}")
+    message(STATUS "  Apple backends/extensions: ${SECEDA_EXECUTORCH_ENABLE_APPLE}")
+    message(STATUS "  Metal backend (experimental): ${SECEDA_EXECUTORCH_ENABLE_METAL}")
 endif()
 message(STATUS "")

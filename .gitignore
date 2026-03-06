@@ -123,7 +123,6 @@ cache/
 sstate-cache/
 downloads/
 deploy/
-build-telechips-sdk/
 
 # Coverage reports
 *.gcov
