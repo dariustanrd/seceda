@@ -1,0 +1,190 @@
+{
+    "version": 6,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 29,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "base",
+            "hidden": true,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+            }
+        },
+        {
+            "name": "native-debug",
+            "displayName": "Native Debug",
+            "description": "Native debug build for local development",
+            "inherits": "base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "SECEDA_BUILD_LLAMA_CPP": "ON",
+                "SECEDA_BUILD_EXECUTORCH": "ON",
+                "SECEDA_BUILD_CUSTOM": "ON",
+                "SECEDA_ENABLE_VULKAN": "OFF",
+                "SECEDA_ENABLE_XNNPACK": "ON",
+                "SECEDA_ENABLE_OPENMP": "ON"
+            }
+        },
+        {
+            "name": "native-release",
+            "displayName": "Native Release",
+            "description": "Native release build",
+            "inherits": "base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "SECEDA_BUILD_LLAMA_CPP": "ON",
+                "SECEDA_BUILD_EXECUTORCH": "ON",
+                "SECEDA_BUILD_CUSTOM": "ON",
+                "SECEDA_ENABLE_VULKAN": "OFF",
+                "SECEDA_ENABLE_XNNPACK": "ON",
+                "SECEDA_ENABLE_OPENMP": "ON"
+            }
+        },
+        {
+            "name": "arm64-base",
+            "hidden": true,
+            "inherits": "base",
+            "toolchainFile": "${sourceDir}/cmake/toolchains/aarch64-linux-gnu.cmake",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "SECEDA_LLAMA_CPU_AARCH64": "ON"
+            }
+        },
+        {
+            "name": "arm64-release",
+            "displayName": "Generic ARM64 Release",
+            "description": "Cross-compile for a generic ARM64 Linux target",
+            "inherits": "arm64-base",
+            "cacheVariables": {
+                "SECEDA_BUILD_LLAMA_CPP": "ON",
+                "SECEDA_BUILD_EXECUTORCH": "ON",
+                "SECEDA_BUILD_CUSTOM": "ON",
+                "SECEDA_ENABLE_VULKAN": "OFF",
+                "SECEDA_ENABLE_XNNPACK": "ON",
+                "SECEDA_ENABLE_OPENMP": "ON",
+                "SECEDA_LLAMA_ENABLE_KLEIDIAI": "OFF"
+            }
+        },
+        {
+            "name": "arm64-vulkan",
+            "displayName": "Generic ARM64 + Vulkan",
+            "description": "Cross-compile for generic ARM64 with Vulkan enabled",
+            "inherits": "arm64-base",
+            "cacheVariables": {
+                "SECEDA_BUILD_LLAMA_CPP": "ON",
+                "SECEDA_BUILD_EXECUTORCH": "ON",
+                "SECEDA_BUILD_CUSTOM": "ON",
+                "SECEDA_ENABLE_VULKAN": "ON",
+                "SECEDA_ENABLE_XNNPACK": "ON",
+                "SECEDA_ENABLE_OPENMP": "ON",
+                "SECEDA_LLAMA_ENABLE_KLEIDIAI": "OFF"
+            }
+        },
+        {
+            "name": "arm64-kleidi",
+            "displayName": "Generic ARM64 + KleidiAI",
+            "description": "Cross-compile for generic ARM64 with KleidiAI CPU optimizations",
+            "inherits": "arm64-base",
+            "cacheVariables": {
+                "SECEDA_BUILD_LLAMA_CPP": "ON",
+                "SECEDA_BUILD_EXECUTORCH": "ON",
+                "SECEDA_BUILD_CUSTOM": "ON",
+                "SECEDA_ENABLE_VULKAN": "OFF",
+                "SECEDA_ENABLE_XNNPACK": "ON",
+                "SECEDA_ENABLE_OPENMP": "ON",
+                "SECEDA_LLAMA_ENABLE_KLEIDIAI": "ON"
+            }
+        },
+        {
+            "name": "arm64-kleidi-vulkan",
+            "displayName": "Generic ARM64 + KleidiAI + Vulkan",
+            "description": "Cross-compile for generic ARM64 with KleidiAI and Vulkan",
+            "inherits": "arm64-base",
+            "cacheVariables": {
+                "SECEDA_BUILD_LLAMA_CPP": "ON",
+                "SECEDA_BUILD_EXECUTORCH": "ON",
+                "SECEDA_BUILD_CUSTOM": "ON",
+                "SECEDA_ENABLE_VULKAN": "ON",
+                "SECEDA_ENABLE_XNNPACK": "ON",
+                "SECEDA_ENABLE_OPENMP": "ON",
+                "SECEDA_LLAMA_ENABLE_KLEIDIAI": "ON"
+            }
+        },
+        {
+            "name": "arm64-llama-only",
+            "displayName": "Generic ARM64 - llama.cpp only",
+            "description": "Cross-compile only the llama.cpp stack for generic ARM64",
+            "inherits": "arm64-base",
+            "cacheVariables": {
+                "SECEDA_BUILD_LLAMA_CPP": "ON",
+                "SECEDA_BUILD_EXECUTORCH": "OFF",
+                "SECEDA_BUILD_CUSTOM": "OFF",
+                "SECEDA_ENABLE_VULKAN": "OFF",
+                "SECEDA_ENABLE_XNNPACK": "OFF",
+                "SECEDA_ENABLE_OPENMP": "ON",
+                "SECEDA_LLAMA_ENABLE_KLEIDIAI": "ON"
+            }
+        },
+        {
+            "name": "arm64-executorch-only",
+            "displayName": "Generic ARM64 - ExecuTorch only",
+            "description": "Cross-compile only ExecuTorch for generic ARM64",
+            "inherits": "arm64-base",
+            "cacheVariables": {
+                "SECEDA_BUILD_LLAMA_CPP": "OFF",
+                "SECEDA_BUILD_EXECUTORCH": "ON",
+                "SECEDA_BUILD_CUSTOM": "OFF",
+                "SECEDA_ENABLE_VULKAN": "OFF",
+                "SECEDA_ENABLE_XNNPACK": "ON",
+                "SECEDA_ENABLE_OPENMP": "OFF"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "native-debug",
+            "configurePreset": "native-debug",
+            "jobs": 0
+        },
+        {
+            "name": "native-release",
+            "configurePreset": "native-release",
+            "jobs": 0
+        },
+        {
+            "name": "arm64-release",
+            "configurePreset": "arm64-release",
+            "jobs": 0
+        },
+        {
+            "name": "arm64-vulkan",
+            "configurePreset": "arm64-vulkan",
+            "jobs": 0
+        },
+        {
+            "name": "arm64-kleidi",
+            "configurePreset": "arm64-kleidi",
+            "jobs": 0
+        },
+        {
+            "name": "arm64-kleidi-vulkan",
+            "configurePreset": "arm64-kleidi-vulkan",
+            "jobs": 0
+        },
+        {
+            "name": "arm64-llama-only",
+            "configurePreset": "arm64-llama-only",
+            "jobs": 0
+        },
+        {
+            "name": "arm64-executorch-only",
+            "configurePreset": "arm64-executorch-only",
+            "jobs": 0
+        }
+    ]
+}

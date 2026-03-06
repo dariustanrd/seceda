@@ -147,3 +147,60 @@ Seceda is intended as a framework, not a fixed policy:
 * Modal cloud inference backend
 * Load testing with many simulated edge devices
 * Visualization dashboard for routing decisions
+
+---
+
+## Build System
+
+The repository now includes a top-level CMake build that can orchestrate:
+
+* `thirdparty/llama.cpp`
+* `thirdparty/executorch`
+* future custom C++ targets under `src/`
+
+Initialize submodules before configuring:
+
+```bash
+git submodule update --init --recursive
+```
+
+### Native builds
+
+```bash
+cmake --preset native-release
+cmake --build --preset native-release
+```
+
+Use `native-debug` for local debugging.
+
+### Generic ARM64 cross-compilation
+
+The ARM presets are generic Linux ARM64 presets, not Telechips/Yocto-specific ones.
+
+```bash
+export ARM_GNU_TOOLCHAIN_ROOT=/opt/toolchains/aarch64-linux-gnu
+export ARM_SYSROOT=/opt/sysroots/aarch64-linux-gnu
+# Optional if your toolchain uses a different prefix:
+export ARM_TARGET_TRIPLE=aarch64-linux-gnu
+
+cmake --preset arm64-release
+cmake --build --preset arm64-release
+```
+
+Available ARM64 presets:
+
+* `arm64-release`
+* `arm64-vulkan`
+* `arm64-kleidi`
+* `arm64-kleidi-vulkan`
+* `arm64-llama-only`
+* `arm64-executorch-only`
+
+If you use a Vulkan preset, make sure `glslc` is available on `PATH` or provide `VULKAN_SDK`.
+
+### Custom C++ targets
+
+`src/CMakeLists.txt` is set up as a reusable template. Add custom targets under `src/` and either:
+
+* call `add_llama_runner(...)` for `llama.cpp`-based apps, or
+* call `add_executorch_runner(...)` for ExecuTorch-based apps.
