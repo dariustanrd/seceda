@@ -14,7 +14,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Top-level build selection
 option(SECEDA_BUILD_LLAMA_CPP "Build llama.cpp" ON)
 option(SECEDA_BUILD_EXECUTORCH "Build ExecuTorch" ON)
-option(SECEDA_BUILD_CUSTOM "Build first-party edge C++ code in seceda/edge/cpp" ON)
+option(SECEDA_BUILD_CUSTOM "Build first-party edge C++ code in seceda_edge/cpp" ON)
 
 # Backend options shared across downstream components
 option(SECEDA_ENABLE_VULKAN "Enable Vulkan backends where available" OFF)
@@ -274,12 +274,12 @@ if(SECEDA_BUILD_EXECUTORCH)
 endif()
 
 if(SECEDA_BUILD_CUSTOM)
-    if(EXISTS "${SECEDA_ROOT_DIR}/seceda/edge/cpp/CMakeLists.txt")
+    if(EXISTS "${SECEDA_ROOT_DIR}/seceda_edge/cpp/CMakeLists.txt")
         message(STATUS "")
         message(STATUS "=== Configuring edge C++ code ===")
-        add_subdirectory(seceda/edge/cpp)
+        add_subdirectory(seceda_edge/cpp)
     else()
-        message(STATUS "No seceda/edge/cpp/CMakeLists.txt found - skipping edge C++ build")
+        message(STATUS "No seceda_edge/cpp/CMakeLists.txt found - skipping edge C++ build")
     endif()
 endif()
 

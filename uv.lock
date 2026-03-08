@@ -6,6 +6,18 @@ resolution-markers = [
     "python_full_version < '3.14'",
 ]
 
+[manifest]
+members = [
+    "seceda-cloud",
+    "seceda-edge",
+]
+
+[manifest.dependency-groups]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
 [[package]]
 name = "aiohappyeyeballs"
 version = "2.6.1"
@@ -1025,17 +1037,12 @@ wheels = [
 ]
 
 [[package]]
-name = "seceda"
+name = "seceda-cloud"
 version = "0.1.0"
-source = { editable = "." }
-
-[package.optional-dependencies]
-cloud = [
+source = { virtual = "seceda_cloud" }
+dependencies = [
     { name = "aiohttp" },
     { name = "modal" },
-]
-edge = [
-    { name = "openai" },
 ]
 
 [package.dev-dependencies]
@@ -1046,11 +1053,32 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiohttp", marker = "extra == 'cloud'" },
-    { name = "modal", marker = "extra == 'cloud'" },
-    { name = "openai", marker = "extra == 'edge'", specifier = ">=2.26.0" },
+    { name = "aiohttp" },
+    { name = "modal" },
 ]
-provides-extras = ["cloud", "edge"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[[package]]
+name = "seceda-edge"
+version = "0.1.0"
+source = { virtual = "seceda_edge" }
+dependencies = [
+    { name = "openai" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "openai", specifier = ">=2.26.0" }]
 
 [package.metadata.requires-dev]
 dev = [

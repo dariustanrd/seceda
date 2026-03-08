@@ -1,18 +1,19 @@
 # Repo Structure Summary
 
 This document captures the current intended repository layout for Seceda.
-First-party code lives under the top-level `seceda/` namespace, while vendored stacks
+First-party code lives in top-level project directories, while vendored stacks
 remain under `thirdparty/`.
 
 ## Design Goals
 
 The codebase is organized by runtime responsibility first:
 
-- `seceda/edge/cpp/` contains the production edge runtime and local model orchestration.
-- `seceda/edge/` contains optional edge-side Python helpers and experiments.
-- `seceda/cloud/` contains the Modal deployment and vLLM cloud-serving code.
-- `seceda/shared/` is reserved for Seceda-specific contracts and fixtures that may be
+- `seceda_edge/cpp/` contains the production edge runtime and local model orchestration.
+- `seceda_edge/` contains optional edge-side Python helpers and experiments.
+- `seceda_cloud/` contains the Modal deployment and vLLM cloud-serving code.
+- `seceda_shared/` is reserved for Seceda-specific contracts and fixtures that may be
   consumed by multiple runtimes later.
+- `seceda_gui/` is reserved for future user-facing tooling.
 - `thirdparty/` continues to host vendored inference stacks such as
   `llama.cpp` and `executorch`.
 
@@ -34,39 +35,38 @@ seceda/
   docs/
     initial-plans/
       repo_structure_summary.md
-  seceda/
+  seceda_cloud/
+    pyproject.toml
     __init__.py
-    cloud/
-      __init__.py
+    README.md
+    vllm_inference.py
+    tests/
       README.md
-      vllm_inference.py
+  seceda_edge/
+    pyproject.toml
+    __init__.py
+    README.md
+    test_client.py
+    cpp/
+      CMakeLists.txt
+      README.md
+      src/
+      apps/
+        seceda_edge_daemon/
       tests/
-        README.md
-    edge/
-      __init__.py
+    tests/
       README.md
-      test_client.py
-      cpp/
-        CMakeLists.txt
-        README.md
-        src/
-        apps/
-          seceda_edge_daemon/
-        tests/
-      tests/
-        README.md
-    shared/
-      README.md
-      contracts/
-        README.md
-      fixtures/
-        README.md
+  seceda_shared/
+    README.md
+  seceda_gui/
+    README.md
+  src/ [legacy transition area during layout migration]
   thirdparty/
 ```
 
 ## Edge Runtime
 
-`seceda/edge/cpp/` is the home for first-party C++ code.
+`seceda_edge/cpp/` is the home for first-party C++ code.
 
 Key responsibilities:
 
@@ -77,36 +77,40 @@ Key responsibilities:
 - telemetry and benchmarking hooks.
 
 The root `CMakeLists.txt` still owns the third-party superbuild, and it now
-looks for first-party native code in `seceda/edge/cpp/`.
+looks for first-party native code in `seceda_edge/cpp/`.
 
 ## Python Tooling
 
-The repository root `pyproject.toml` is the canonical `uv` entrypoint for the
-`seceda` Python package.
+The repository root `pyproject.toml` is the canonical `uv` workspace entrypoint
+for the standalone Python projects.
 
 Current conventions:
 
-- runtime-specific dependencies are modeled as root-level extras,
-- `cloud` installs the dependencies needed for `seceda/cloud/`,
-- `edge` installs the dependencies needed for `seceda/edge/`,
+- `seceda_cloud/pyproject.toml` and `seceda_edge/pyproject.toml` are standalone
+  project entrypoints,
+- the repo-root `pyproject.toml` coordinates both projects as a single workspace,
+- combined local setup uses `uv sync --all-packages`,
+- member-specific commands can use `uv run --package <member-name> ...`,
+- individual deployment or isolated development can run `uv` directly inside each
+  member directory,
 - dependency locking uses the shared repo-root `uv.lock`,
-- commands should be run from the repo root with `uv run --extra <name> ...`.
+- commands can be run from the repo root or from within a member project.
 
 ### Cloud Runtime
 
-The first cloud implementation lives at `seceda/cloud/vllm_inference.py` and
+The first cloud implementation lives at `seceda_cloud/vllm_inference.py` and
 follows Modal's OpenAI-compatible vLLM server pattern.
 
 ### Edge Python
 
-`seceda/edge/` is available for edge-side helpers that benefit from Python,
-while the production request path remains C++-first under `seceda/edge/cpp/`.
+`seceda_edge/` is available for edge-side helpers that benefit from Python,
+while the production request path remains C++-first under `seceda_edge/cpp/`.
 
 ## Invocation Model
 
 The planned production interaction is:
 
-1. `seceda/edge/cpp/` handles the request locally.
+1. `seceda_edge/cpp/` handles the request locally.
 2. If the request should escalate, the edge runtime calls the deployed cloud
    endpoint over HTTPS.
 3. The Modal app hosts a vLLM server that exposes an OpenAI-compatible API.
@@ -118,12 +122,12 @@ optional for tooling or experiments in the MVP.
 
 These paths are intentionally deferred until they are justified by real code:
 
-- `seceda/shared/contracts/` for versioned Seceda-specific payload schemas,
-- `seceda/shared/fixtures/` for cross-runtime integration fixtures.
+- `seceda_shared/contracts/` for versioned Seceda-specific payload schemas,
+- `seceda_shared/fixtures/` for cross-runtime integration fixtures.
 
 ## Working Rules
 
 - keep the edge production path C++-first,
-- keep Modal deployment logic under `seceda/cloud/`,
+- keep Modal deployment logic under `seceda_cloud/`,
 - use HTTPS from non-Python clients,
 - use `uv` for Python dependency management,

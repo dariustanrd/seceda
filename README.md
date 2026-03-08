@@ -156,7 +156,7 @@ The repository now includes a top-level CMake build that can orchestrate:
 
 * `thirdparty/llama.cpp`
 * `thirdparty/executorch`
-* first-party edge C++ targets under `seceda/edge/cpp/`
+* first-party edge C++ targets under `seceda_edge/cpp/`
 
 Initialize submodules before configuring:
 
@@ -226,33 +226,37 @@ If you use a Vulkan preset, make sure `glslc` is available on `PATH` or provide 
 
 ### Custom C++ targets
 
-`seceda/edge/cpp/CMakeLists.txt` is the first-party native entrypoint. Add edge runtime code under `seceda/edge/cpp/` and either:
+`seceda_edge/cpp/CMakeLists.txt` is the first-party native entrypoint. Add edge runtime code under `seceda_edge/cpp/` and either:
 
 * call `add_llama_runner(...)` for `llama.cpp`-based apps, or
 * call `add_executorch_runner(...)` for ExecuTorch-based apps.
 
-### Python Package
+### Python Projects
 
-The repo-root `pyproject.toml` is the canonical `uv` entrypoint for the `seceda`
-package. Runtime-specific dependencies are exposed as extras:
+The repo-root `pyproject.toml` is a `uv` workspace entrypoint for two standalone
+Python projects:
 
-* `cloud` for Modal and vLLM tooling under `seceda/cloud/`
-* `edge` for edge-side Python helpers under `seceda/edge/`
+* `seceda_cloud/` for Modal and vLLM tooling
+* `seceda_edge/` for edge-side Python helpers
 
-Typical workflow from the repository root:
+Install both projects together from the repository root:
 
 ```bash
 uv lock
-uv sync --extra cloud
-uv run --extra cloud modal run seceda/cloud/vllm_inference.py
+uv sync --all-packages
 ```
 
-For edge-side tooling:
+Run project-specific commands from the repository root:
 
 ```bash
-uv sync --extra edge
-uv run --extra edge python seceda/edge/test_client.py
+uv run --package seceda-cloud modal run seceda_cloud/vllm_inference.py
+uv run --package seceda-edge python seceda_edge/test_client.py
 ```
 
-If you want one environment with both dependency sets, use
-`uv sync --extra cloud --extra edge`.
+Each project also works on its own for deployment or isolated development:
+
+```bash
+cd seceda_edge
+uv sync
+uv run python test_client.py
+```
