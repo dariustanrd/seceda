@@ -8,8 +8,9 @@ set(EXECUTORCH_INSTALL_DIR ${SECEDA_INSTALL_DIR}/executorch)
 set(EXECUTORCH_BUILD_DIR ${SECEDA_BUILD_DIR}/executorch-build)
 
 set(
-    SECEDA_CUSTOM_INCLUDE_DIRS
+    SECEDA_EDGE_CPP_INCLUDE_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${SECEDA_ROOT_DIR}
 )
 
@@ -75,6 +76,27 @@ function(seceda_finalize_target TARGET_NAME)
     endif()
 endfunction()
 
+function(seceda_add_edge_executable TARGET_NAME)
+    cmake_parse_arguments(TARGET "" "" "SOURCES;EXTRA_LIBS;EXTRA_INCLUDES" ${ARGN})
+
+    add_executable(${TARGET_NAME} ${TARGET_SOURCES})
+
+    target_include_directories(
+        ${TARGET_NAME}
+        PRIVATE
+            ${SECEDA_EDGE_CPP_INCLUDE_DIRS}
+            ${TARGET_EXTRA_INCLUDES}
+    )
+
+    target_link_libraries(
+        ${TARGET_NAME}
+        PRIVATE
+            ${TARGET_EXTRA_LIBS}
+    )
+
+    seceda_finalize_target(${TARGET_NAME})
+endfunction()
+
 function(add_llama_runner TARGET_NAME)
     cmake_parse_arguments(RUNNER "" "" "SOURCES;EXTRA_LIBS;EXTRA_INCLUDES" ${ARGN})
 
@@ -88,7 +110,7 @@ function(add_llama_runner TARGET_NAME)
     target_include_directories(
         ${TARGET_NAME}
         PRIVATE
-            ${SECEDA_CUSTOM_INCLUDE_DIRS}
+            ${SECEDA_EDGE_CPP_INCLUDE_DIRS}
             ${LLAMA_CPP_INCLUDE_DIRS}
             ${RUNNER_EXTRA_INCLUDES}
     )
@@ -120,7 +142,7 @@ function(add_executorch_runner TARGET_NAME)
     target_include_directories(
         ${TARGET_NAME}
         PRIVATE
-            ${SECEDA_CUSTOM_INCLUDE_DIRS}
+            ${SECEDA_EDGE_CPP_INCLUDE_DIRS}
             ${EXECUTORCH_INCLUDE_DIRS}
             ${RUNNER_EXTRA_INCLUDES}
     )
@@ -150,23 +172,7 @@ function(add_executorch_runner TARGET_NAME)
     seceda_finalize_target(${TARGET_NAME})
 endfunction()
 
-# Example:
-# add_llama_runner(seceda_llama_app
-#     SOURCES
-#         apps/seceda_llama_app.cpp
-#     EXTRA_LIBS
-#         pthread
-# )
-#
-# Example:
-# add_executorch_runner(seceda_et_app
-#     SOURCES
-#         apps/seceda_et_app.cpp
-#     EXTRA_LIBS
-#         extension_llm_runner
-# )
-
-foreach(subdir IN ITEMS apps lib llama_runners executorch_runners)
+foreach(subdir IN ITEMS src apps tests)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${subdir}/CMakeLists.txt")
         add_subdirectory(${subdir})
     endif()

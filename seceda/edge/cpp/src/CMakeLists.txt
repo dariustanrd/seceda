@@ -1,0 +1,5 @@
+foreach(subdir IN ITEMS runtime router local_models cloud_bridge telemetry)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${subdir}/CMakeLists.txt")
+        add_subdirectory(${subdir})
+    endif()
+endforeach()

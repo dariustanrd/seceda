@@ -156,7 +156,7 @@ The repository now includes a top-level CMake build that can orchestrate:
 
 * `thirdparty/llama.cpp`
 * `thirdparty/executorch`
-* future custom C++ targets under `src/`
+* first-party edge C++ targets under `seceda/edge/cpp/`
 
 Initialize submodules before configuring:
 
@@ -226,7 +226,33 @@ If you use a Vulkan preset, make sure `glslc` is available on `PATH` or provide 
 
 ### Custom C++ targets
 
-`src/CMakeLists.txt` is set up as a reusable template. Add custom targets under `src/` and either:
+`seceda/edge/cpp/CMakeLists.txt` is the first-party native entrypoint. Add edge runtime code under `seceda/edge/cpp/` and either:
 
 * call `add_llama_runner(...)` for `llama.cpp`-based apps, or
 * call `add_executorch_runner(...)` for ExecuTorch-based apps.
+
+### Python Package
+
+The repo-root `pyproject.toml` is the canonical `uv` entrypoint for the `seceda`
+package. Runtime-specific dependencies are exposed as extras:
+
+* `cloud` for Modal and vLLM tooling under `seceda/cloud/`
+* `edge` for edge-side Python helpers under `seceda/edge/`
+
+Typical workflow from the repository root:
+
+```bash
+uv lock
+uv sync --extra cloud
+uv run --extra cloud modal run seceda/cloud/vllm_inference.py
+```
+
+For edge-side tooling:
+
+```bash
+uv sync --extra edge
+uv run --extra edge python seceda/edge/test_client.py
+```
+
+If you want one environment with both dependency sets, use
+`uv sync --extra cloud --extra edge`.
