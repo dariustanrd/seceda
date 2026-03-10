@@ -17,17 +17,17 @@ import modal
 import modal.experimental
 
 APP_NAME = "seceda-vllm-inference"
-MODEL_NAME = os.getenv("SECEDA_VLLM_MODEL", "Qwen/Qwen3.5-4B")
+MODEL_NAME = os.getenv("SECEDA_VLLM_MODEL", "LiquidAI/LFM2-24B-A2B")
 MODEL_REVISION = os.getenv(
-    "SECEDA_VLLM_REVISION",
-    "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+    "SECEDA_VLLM_MODEL_REVISION",
+    "a15c25dc8c1d348efd4d7859df744b74ce414f45",
 )
 SERVED_MODEL_NAME = os.getenv("SECEDA_SERVED_MODEL", "seceda-cloud-default")
-GPU_CONFIG = os.getenv("SECEDA_MODAL_GPU", "A100:1")
+GPU_CONFIG = os.getenv("SECEDA_MODAL_GPU", "H100:1")
 VLLM_PORT = int(os.getenv("SECEDA_VLLM_PORT", "8000"))
 TARGET_INPUTS = int(os.getenv("SECEDA_TARGET_INPUTS", "32"))
 MAX_INPUTS = int(os.getenv("SECEDA_MAX_INPUTS", "100"))
-FAST_BOOT = os.getenv("SECEDA_FAST_BOOT", "false").lower() in {"1", "true", "yes"}
+# FAST_BOOT = os.getenv("SECEDA_FAST_BOOT", "false").lower() in {"1", "true", "yes"}
 
 REGION = os.getenv("SECEDA_MODAL_REGION", "us-east")
 
@@ -44,17 +44,17 @@ vllm_cache_volume = modal.Volume.from_name("seceda-vllm-cache", create_if_missin
 HF_SECRET = modal.Secret.from_name("huggingface-secret")
 
 vllm_image = (
-    modal.Image.from_registry("nvidia/cuda:12.8.0-devel-ubuntu22.04", add_python="3.12")
+    modal.Image.from_registry("vllm/vllm-openai:v0.15.1")
     .entrypoint([])
-    .uv_pip_install(
-        "vllm>=0.17.0",
-        "huggingface-hub",
-    )
+    .run_commands("ln -s $(which python3) /usr/bin/python")
+    .pip_install("transformers==5.1.0")
     .env(
         {
             "HF_HUB_CACHE": "/root/.cache/huggingface",
             "HF_XET_HIGH_PERFORMANCE": "1",
             "VLLM_SERVER_DEV_MODE": "1",
+            "TORCH_CPP_LOG_LEVEL": "FATAL",
+            "MODEL_NAME": MODEL_NAME,
         }
     )
 )
@@ -148,6 +148,10 @@ def _build_vllm_command() -> list[str]:
         "0.0.0.0",
         "--port",
         str(VLLM_PORT),
+        "--dtype",
+        "bfloat16",
+        "--gpu-memory-utilization",
+        "0.8",
         "--uvicorn-log-level",
         "info",
         "--max-num-seqs",
@@ -158,8 +162,8 @@ def _build_vllm_command() -> list[str]:
     ]
     if MODEL_REVISION:
         cmd.extend(["--revision", MODEL_REVISION])
-    if FAST_BOOT:
-        cmd.append("--enforce-eager")
+    # if FAST_BOOT:
+    #     cmd.append("--enforce-eager")
     return cmd
 
 
