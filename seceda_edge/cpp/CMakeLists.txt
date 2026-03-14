@@ -11,8 +11,11 @@ set(
     SECEDA_EDGE_CPP_INCLUDE_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${SECEDA_ROOT_DIR}
 )
+
+set(SECEDA_LLAMA_VENDOR_DIR ${SECEDA_LLAMA_CPP_DIR}/vendor)
 
 if(SECEDA_BUILD_LLAMA_CPP)
     set(LLAMA_CPP_INCLUDE_DIRS ${LLAMA_CPP_INSTALL_DIR}/include)
@@ -64,6 +67,32 @@ if(SECEDA_BUILD_EXECUTORCH)
     message(STATUS "ExecuTorch lib: ${EXECUTORCH_LIBRARY_DIRS}")
 endif()
 
+find_package(CURL REQUIRED)
+
+add_library(seceda_edge_common INTERFACE)
+target_include_directories(
+    seceda_edge_common
+    INTERFACE
+        ${SECEDA_EDGE_CPP_INCLUDE_DIRS}
+        ${SECEDA_LLAMA_VENDOR_DIR}
+)
+target_link_libraries(seceda_edge_common INTERFACE pthread)
+
+add_library(seceda_edge_https INTERFACE)
+target_link_libraries(
+    seceda_edge_https
+    INTERFACE
+        seceda_edge_common
+        CURL::libcurl
+)
+
+add_library(
+    seceda_edge_httplib
+    STATIC
+        ${SECEDA_LLAMA_VENDOR_DIR}/cpp-httplib/httplib.cpp
+)
+target_link_libraries(seceda_edge_httplib PUBLIC seceda_edge_common)
+
 function(seceda_finalize_target TARGET_NAME)
     set_target_properties(
         ${TARGET_NAME}
@@ -84,17 +113,52 @@ function(seceda_add_edge_executable TARGET_NAME)
     target_include_directories(
         ${TARGET_NAME}
         PRIVATE
-            ${SECEDA_EDGE_CPP_INCLUDE_DIRS}
             ${TARGET_EXTRA_INCLUDES}
     )
 
     target_link_libraries(
         ${TARGET_NAME}
         PRIVATE
+            seceda_edge_common
             ${TARGET_EXTRA_LIBS}
     )
 
     seceda_finalize_target(${TARGET_NAME})
+endfunction()
+
+function(seceda_add_edge_library TARGET_NAME)
+    cmake_parse_arguments(TARGET "" "" "SOURCES;EXTRA_LIBS;EXTRA_INCLUDES" ${ARGN})
+
+    add_library(${TARGET_NAME} STATIC ${TARGET_SOURCES})
+
+    target_include_directories(
+        ${TARGET_NAME}
+        PRIVATE
+            ${TARGET_EXTRA_INCLUDES}
+    )
+
+    target_link_libraries(
+        ${TARGET_NAME}
+        PUBLIC
+            seceda_edge_common
+            ${TARGET_EXTRA_LIBS}
+    )
+endfunction()
+
+function(seceda_link_llama TARGET_NAME)
+    if(NOT SECEDA_BUILD_LLAMA_CPP)
+        message(FATAL_ERROR "Cannot link ${TARGET_NAME}: SECEDA_BUILD_LLAMA_CPP is OFF")
+    endif()
+
+    target_include_directories(
+        ${TARGET_NAME}
+        PUBLIC
+            ${LLAMA_CPP_INCLUDE_DIRS}
+    )
+
+    target_link_directories(${TARGET_NAME} PUBLIC ${LLAMA_CPP_LIBRARY_DIRS})
+    target_link_libraries(${TARGET_NAME} PUBLIC llama ggml)
+    add_dependencies(${TARGET_NAME} llama_cpp)
 endfunction()
 
 function(add_llama_runner TARGET_NAME)
@@ -110,22 +174,17 @@ function(add_llama_runner TARGET_NAME)
     target_include_directories(
         ${TARGET_NAME}
         PRIVATE
-            ${SECEDA_EDGE_CPP_INCLUDE_DIRS}
-            ${LLAMA_CPP_INCLUDE_DIRS}
             ${RUNNER_EXTRA_INCLUDES}
     )
-
-    target_link_directories(${TARGET_NAME} PRIVATE ${LLAMA_CPP_LIBRARY_DIRS})
 
     target_link_libraries(
         ${TARGET_NAME}
         PRIVATE
-            llama
-            ggml
+            seceda_edge_common
             ${RUNNER_EXTRA_LIBS}
     )
 
-    add_dependencies(${TARGET_NAME} llama_cpp)
+    seceda_link_llama(${TARGET_NAME})
     seceda_finalize_target(${TARGET_NAME})
 endfunction()
 
@@ -142,7 +201,6 @@ function(add_executorch_runner TARGET_NAME)
     target_include_directories(
         ${TARGET_NAME}
         PRIVATE
-            ${SECEDA_EDGE_CPP_INCLUDE_DIRS}
             ${EXECUTORCH_INCLUDE_DIRS}
             ${RUNNER_EXTRA_INCLUDES}
     )
@@ -152,6 +210,7 @@ function(add_executorch_runner TARGET_NAME)
     target_link_libraries(
         ${TARGET_NAME}
         PRIVATE
+            seceda_edge_common
             executorch
             executorch_core
             extension_module_static

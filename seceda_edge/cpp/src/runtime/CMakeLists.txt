@@ -1,0 +1,9 @@
+seceda_add_edge_library(
+    seceda_edge_runtime
+    SOURCES
+        runtime_config.cpp
+        request_executor.cpp
+        edge_daemon.cpp
+    EXTRA_LIBS
+        seceda_edge_telemetry
+)

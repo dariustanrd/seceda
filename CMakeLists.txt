@@ -11,6 +11,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+include(CTest)
+
 # Top-level build selection
 option(SECEDA_BUILD_LLAMA_CPP "Build llama.cpp" ON)
 option(SECEDA_BUILD_EXECUTORCH "Build ExecuTorch" ON)
