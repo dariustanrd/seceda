@@ -48,6 +48,10 @@ json cloud_client_info_to_json(const CloudClientInfo & info) {
         {"base_url", info.base_url},
         {"model", info.model},
         {"timeout_seconds", info.timeout_seconds},
+        {"connect_timeout_seconds", info.connect_timeout_seconds},
+        {"retry_attempts", info.retry_attempts},
+        {"retry_backoff_ms", info.retry_backoff_ms},
+        {"send_modal_session_id", info.send_modal_session_id},
         {"verify_tls", info.verify_tls},
     };
 }

@@ -222,7 +222,7 @@ That backend is still considered experimental, so prefer `apple-silicon-release`
 
 ### Generic ARM64 cross-compilation
 
-The ARM presets are generic Linux ARM64 presets, not Telechips/Yocto-specific ones.
+The ARM presets are generic Linux ARM64 presets.
 
 ```bash
 export ARM_GNU_TOOLCHAIN_ROOT=/opt/toolchains/aarch64-linux-gnu
@@ -251,6 +251,73 @@ If you use a Vulkan preset, make sure `glslc` is available on `PATH` or provide 
 
 * call `add_llama_runner(...)` for `llama.cpp`-based apps, or
 * call `add_executorch_runner(...)` for ExecuTorch-based apps.
+
+### Edge daemon to Modal SGLang
+
+The current edge daemon can call a deployed Modal-backed SGLang URL directly via
+the OpenAI-compatible `POST /v1/chat/completions` interface. The shared
+edge-to-cloud contract lives in `seceda_shared/README.md`.
+
+For quick local iteration on the edge daemon alone, it is often simpler to
+disable ExecuTorch and build the first-party C++ targets plus `llama.cpp`:
+
+```bash
+scripts/build.sh -p apple-silicon-release --cmake-arg -DSECEDA_BUILD_EXECUTORCH=OFF
+```
+
+Start the daemon with a local GGUF model and the deployed Modal flash URL:
+
+```bash
+export MODAL_FLASH_URL="https://<your-modal-url>"
+# Optional when the deployed endpoint is protected by bearer auth:
+export SECEDA_CLOUD_API_KEY="<token>"
+
+./build/apple-silicon-release/seceda_edge/cpp/apps/seceda_edge_daemon/seceda_edge_daemon \
+  --model-path ./models/LFM2-1.2B-GGUF/LFM2-1.2B-Q8_0.gguf \
+  --cloud-base-url "${MODAL_FLASH_URL}" \
+  --cloud-model seceda-cloud-default \
+  --cloud-connect-timeout-seconds 10 \
+  --cloud-timeout-seconds 120 \
+  --cloud-retry-attempts 2 \
+  --cloud-retry-backoff-ms 1000 \
+  --cloud-send-modal-session-id true
+```
+
+Single-turn smoke path:
+
+1. Verify the deployed Modal endpoint is up:
+
+```bash
+curl "${MODAL_FLASH_URL}/health"
+```
+
+2. Verify the edge daemon is up:
+
+```bash
+curl http://127.0.0.1:8080/health
+```
+
+3. Force one cloud-routed inference through the edge daemon:
+
+```bash
+curl http://127.0.0.1:8080/inference \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "Explain why request-scoped Modal session ids are useful.",
+    "route_override": "cloud",
+    "options": {
+      "max_tokens": 96
+    }
+  }'
+```
+
+4. Confirm the response shows `"ok": true`, `"final_target": "cloud"`, and a
+   non-empty `"text"` field.
+
+For the first milestone, the edge daemon generates a fresh `Modal-Session-ID`
+per logical inference request and reuses it only across retries for that same
+request. A future multi-turn upgrade will let callers supply a stable
+interaction-scoped session identifier.
 
 ### Python Projects
 

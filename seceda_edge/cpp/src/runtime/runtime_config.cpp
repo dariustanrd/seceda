@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <sstream>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 namespace seceda::edge {
@@ -219,6 +220,27 @@ bool RuntimeConfigParser::parse(
                 !parse_number(value, config.cloud.timeout_seconds, error)) {
                 return false;
             }
+        } else if (arg.rfind("--cloud-connect-timeout-seconds", 0) == 0) {
+            if (!next_value(argc, argv, i, arg, value, error) ||
+                !parse_number(value, config.cloud.connect_timeout_seconds, error)) {
+                return false;
+            }
+        } else if (arg.rfind("--cloud-retry-attempts", 0) == 0) {
+            if (!next_value(argc, argv, i, arg, value, error) ||
+                !parse_number(value, config.cloud.retry_attempts, error)) {
+                return false;
+            }
+        } else if (arg.rfind("--cloud-retry-backoff-ms", 0) == 0) {
+            if (!next_value(argc, argv, i, arg, value, error) ||
+                !parse_number(value, config.cloud.retry_backoff_ms, error)) {
+                return false;
+            }
+        } else if (arg.rfind("--cloud-send-modal-session-id", 0) == 0) {
+            if (!next_value(argc, argv, i, arg, value, error) ||
+                !parse_bool(value, config.cloud.send_modal_session_id)) {
+                error = "Invalid boolean value for --cloud-send-modal-session-id: " + value;
+                return false;
+            }
         } else if (arg.rfind("--cloud-verify-tls", 0) == 0) {
             if (!next_value(argc, argv, i, arg, value, error) ||
                 !parse_bool(value, config.cloud.verify_tls)) {
@@ -281,6 +303,22 @@ bool RuntimeConfigParser::parse(
         error = "Router max estimated tokens must be positive";
         return false;
     }
+    if (config.cloud.timeout_seconds <= 0) {
+        error = "Cloud timeout seconds must be positive";
+        return false;
+    }
+    if (config.cloud.connect_timeout_seconds <= 0) {
+        error = "Cloud connect timeout seconds must be positive";
+        return false;
+    }
+    if (config.cloud.retry_attempts < 0) {
+        error = "Cloud retry attempts must be zero or greater";
+        return false;
+    }
+    if (config.cloud.retry_backoff_ms < 0) {
+        error = "Cloud retry backoff must be zero or greater";
+        return false;
+    }
 
     if (config.cloud.api_key.empty()) {
         if (const char * env_api_key = std::getenv("SECEDA_CLOUD_API_KEY")) {
@@ -325,6 +363,10 @@ std::string RuntimeConfigParser::help_text(const char * program_name) {
         << "  --cloud-model NAME\n"
         << "  --cloud-api-key KEY\n"
         << "  --cloud-timeout-seconds N\n"
+        << "  --cloud-connect-timeout-seconds N\n"
+        << "  --cloud-retry-attempts N\n"
+        << "  --cloud-retry-backoff-ms N\n"
+        << "  --cloud-send-modal-session-id true|false\n"
         << "  --cloud-verify-tls true|false\n\n"
         << "Observability:\n"
         << "  --event-log-capacity N\n";

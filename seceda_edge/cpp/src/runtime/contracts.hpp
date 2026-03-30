@@ -200,6 +200,10 @@ struct CloudConfig {
     std::string model = "seceda-cloud-default";
     std::string api_key;
     int timeout_seconds = 120;
+    int connect_timeout_seconds = 10;
+    int retry_attempts = 2;
+    int retry_backoff_ms = 1000;
+    bool send_modal_session_id = false;
     bool verify_tls = true;
 };
 
@@ -235,6 +239,10 @@ struct CloudClientInfo {
     std::string base_url;
     std::string model;
     int timeout_seconds = 0;
+    int connect_timeout_seconds = 0;
+    int retry_attempts = 0;
+    int retry_backoff_ms = 0;
+    bool send_modal_session_id = false;
     bool verify_tls = true;
 };
 
