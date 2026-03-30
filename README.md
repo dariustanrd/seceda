@@ -164,6 +164,27 @@ Initialize submodules before configuring:
 git submodule update --init --recursive
 ```
 
+### ExecuTorch and Python (uv)
+
+ExecuTorch’s C++ configure step expects a **Python 3.11+** interpreter that can `import torch` (used to locate PyTorch headers when optimized kernels are enabled). That matches the workspace packages (`requires-python = ">=3.11"`).
+
+CMake picks an interpreter in this order:
+
+1. `-DPython3_EXECUTABLE=...` on the configure line (e.g. from `scripts/build.sh --python`)
+2. Environment variable `SECEDA_PYTHON`
+3. `./.venv/bin/python3` (or `python`) when present
+4. Otherwise CMake’s default search (may select an older system Python on macOS)
+
+Recommended: use the repo virtualenv and install torch there:
+
+```bash
+uv sync --group executorch-build
+```
+
+Then configure as usual, or use `scripts/build.sh`, which applies the same preference order for preflight checks.
+
+If `uv lock` or `uv sync` fails with **dns error** / **failed to lookup address information** when fetching `torch` from `files.pythonhosted.org`, the issue is network reachability to PyPI (offline machine, broken DNS, VPN, or corporate proxy), not the repo layout. Fix DNS/connectivity, or run `uv sync --group executorch-build` on a network you trust and commit the updated `uv.lock`. As a last resort, install PyTorch into the same interpreter CMake uses (e.g. `.venv`) with `pip install torch` and point CMake at that Python via `--python` or `SECEDA_PYTHON`.
+
 ### Native builds
 
 ```bash

@@ -10,6 +10,15 @@ dev = [
     "ruff",
 ]
 
+# ExecuTorch's C++ build (EXECUTORCH_BUILD_KERNELS_OPTIMIZED) probes PyTorch via
+# the interpreter passed to CMake. Install with:
+#   uv sync --group executorch-build
+executorch-build = [
+    "torch",
+    "huggingface-hub",
+    "pyyaml",
+]
+
 [tool.ruff]
 line-length = 100
 

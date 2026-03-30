@@ -91,7 +91,20 @@ if(SECEDA_ENABLE_VULKAN)
 endif()
 
 if(SECEDA_BUILD_EXECUTORCH)
-    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    # Prefer the same interpreter as the uv workspace (.venv) so ExecuTorch CMake
+    # finds torch headers. Override with -DPython3_EXECUTABLE=... or SECEDA_PYTHON.
+    if(NOT Python3_EXECUTABLE)
+        if(DEFINED ENV{SECEDA_PYTHON} AND EXISTS "$ENV{SECEDA_PYTHON}")
+            set(Python3_EXECUTABLE "$ENV{SECEDA_PYTHON}")
+        elseif(EXISTS "${SECEDA_ROOT_DIR}/.venv/bin/python3")
+            set(Python3_EXECUTABLE "${SECEDA_ROOT_DIR}/.venv/bin/python3")
+        elseif(EXISTS "${SECEDA_ROOT_DIR}/.venv/bin/python")
+            set(Python3_EXECUTABLE "${SECEDA_ROOT_DIR}/.venv/bin/python")
+        endif()
+    endif()
+
+    find_package(Python3 3.11 COMPONENTS Interpreter REQUIRED)
+
     message(STATUS "Python interpreter: ${Python3_EXECUTABLE}")
 endif()
 
