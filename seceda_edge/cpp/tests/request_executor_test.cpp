@@ -71,7 +71,8 @@ int main() {
     local.result_.text = "local answer";
 
     InferenceRequest request;
-    request.text = "hello";
+    request.messages.push_back({"user", "hello", {}, {}, {}});
+    refresh_request_views(request);
 
     auto local_response = executor.execute(request);
     if (!require(local_response.ok, "local request should succeed")) {
@@ -116,7 +117,7 @@ int main() {
         return 1;
     }
 
-    request.route_override = RouteTarget::kLocal;
+    request.seceda.route_override = RouteTarget::kLocal;
     local.ready_ = false;
     auto forced_local_response = executor.execute(request);
     if (!require(!forced_local_response.ok, "forced local should fail when local runtime is unavailable")) {

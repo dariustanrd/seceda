@@ -27,14 +27,16 @@ int main() {
     HeuristicRouter router(config);
 
     InferenceRequest local_request;
-    local_request.text = "hello there";
+    local_request.messages.push_back({"user", "hello there", {}, {}, {}});
+    refresh_request_views(local_request);
     auto local_decision = router.decide(local_request);
     if (!require(local_decision.target == RouteTarget::kLocal, "short prompt should stay local")) {
         return 1;
     }
 
     InferenceRequest structured_request;
-    structured_request.text = "return json with a schema";
+    structured_request.messages.push_back({"user", "return json with a schema", {}, {}, {}});
+    refresh_request_views(structured_request);
     auto structured_decision = router.decide(structured_request);
     if (!require(
             structured_decision.target == RouteTarget::kCloud,
@@ -43,7 +45,8 @@ int main() {
     }
 
     InferenceRequest freshness_request;
-    freshness_request.text = "what is the weather today";
+    freshness_request.messages.push_back({"user", "what is the weather today", {}, {}, {}});
+    refresh_request_views(freshness_request);
     auto freshness_decision = router.decide(freshness_request);
     if (!require(
             freshness_decision.target == RouteTarget::kCloud,
@@ -52,7 +55,9 @@ int main() {
     }
 
     InferenceRequest long_request;
-    long_request.text = "this prompt is intentionally long enough to exceed the short max chars";
+    long_request.messages.push_back(
+        {"user", "this prompt is intentionally long enough to exceed the short max chars", {}, {}, {}});
+    refresh_request_views(long_request);
     auto long_decision = router.decide(long_request);
     if (!require(long_decision.target == RouteTarget::kCloud, "long prompt should route to cloud")) {
         return 1;

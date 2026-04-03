@@ -172,9 +172,14 @@ bool RuntimeConfigParser::parse(
             }
         } else if (arg.rfind("--default-max-tokens", 0) == 0) {
             if (!next_value(argc, argv, i, arg, value, error) ||
-                !parse_number(value, config.default_generation.max_tokens, error)) {
+                !parse_number(value, config.default_generation.max_completion_tokens, error)) {
                 return false;
             }
+        } else if (arg.rfind("--public-model-alias", 0) == 0) {
+            if (!next_value(argc, argv, i, arg, value, error)) {
+                return false;
+            }
+            config.public_model_alias = value;
         } else if (arg.rfind("--default-temperature", 0) == 0) {
             if (!next_value(argc, argv, i, arg, value, error) ||
                 !parse_number(value, config.default_generation.temperature, error)) {
@@ -295,7 +300,7 @@ bool RuntimeConfigParser::parse(
         error = "Batch size must be positive";
         return false;
     }
-    if (config.default_generation.max_tokens <= 0) {
+    if (config.default_generation.max_completion_tokens <= 0) {
         error = "Default max tokens must be positive";
         return false;
     }
@@ -326,6 +331,13 @@ bool RuntimeConfigParser::parse(
         }
     }
 
+    if (config.exposed_models.empty()) {
+        config.exposed_models.push_back(
+            {config.public_model_alias, "Seceda default route", "seceda"});
+    } else {
+        config.exposed_models.front().id = config.public_model_alias;
+    }
+
     return true;
 }
 
@@ -338,7 +350,8 @@ std::string RuntimeConfigParser::help_text(const char * program_name) {
         << "  --port PORT\n"
         << "  --model-path PATH\n"
         << "  --system-prompt TEXT\n"
-        << "  --warmup-prompt TEXT\n\n"
+        << "  --warmup-prompt TEXT\n"
+        << "  --public-model-alias NAME\n\n"
         << "Local llama.cpp options:\n"
         << "  --n-ctx N\n"
         << "  --n-batch N\n"

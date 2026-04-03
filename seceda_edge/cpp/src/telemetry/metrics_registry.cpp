@@ -130,6 +130,10 @@ void MetricsRegistry::push_event(const InferenceResponse & response) {
     event.error_kind = response.error_kind;
     event.route_reason = response.route_reason;
     event.fallback_reason = response.fallback_reason;
+    event.engine_id = response.final_identity.engine_id;
+    event.backend_id = response.final_identity.backend_id;
+    event.model_id = response.final_identity.model_id;
+    event.model_alias = response.final_identity.model_alias;
     event.total_latency_ms = response.total_timing.total_latency_ms;
     if (response.local_timing.has_value()) {
         event.local_latency_ms = response.local_timing->total_latency_ms;

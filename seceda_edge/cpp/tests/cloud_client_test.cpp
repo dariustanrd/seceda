@@ -99,8 +99,9 @@ bool test_streaming_completion_generates_distinct_session_ids() {
     CloudClient client(config);
 
     InferenceRequest first_request;
-    first_request.text = "first";
-    first_request.system_prompt = "be helpful";
+    first_request.messages.push_back({"system", "be helpful", {}, {}, {}});
+    first_request.messages.push_back({"user", "first", {}, {}, {}});
+    refresh_request_views(first_request);
 
     const auto first_result = client.complete(first_request);
     if (!require(first_result.ok, "streaming request should succeed")) {
@@ -122,7 +123,8 @@ bool test_streaming_completion_generates_distinct_session_ids() {
     }
 
     InferenceRequest second_request = first_request;
-    second_request.text = "second";
+    second_request.messages.back().content = "second";
+    refresh_request_views(second_request);
 
     const auto second_result = client.complete(second_request);
     if (!require(second_result.ok, "second streaming request should succeed")) {
@@ -205,7 +207,8 @@ bool test_json_fallback_response_and_conditional_forwarding() {
     CloudClient client(config);
 
     InferenceRequest request;
-    request.text = "json";
+    request.messages.push_back({"user", "json", {}, {}, {}});
+    refresh_request_views(request);
     request.options.top_k = 0;
     request.options.min_p = 0.0f;
     request.options.seed = 1234;
@@ -288,7 +291,8 @@ bool test_retry_on_503_reuses_same_session_id() {
     CloudClient client(config);
 
     InferenceRequest request;
-    request.text = "retry";
+    request.messages.push_back({"user", "retry", {}, {}, {}});
+    refresh_request_views(request);
 
     const auto result = client.complete(request);
     if (!require(result.ok, "retryable 503 should recover")) {
@@ -342,7 +346,8 @@ bool test_partial_stream_returns_error() {
     CloudClient client(config);
 
     InferenceRequest request;
-    request.text = "partial";
+    request.messages.push_back({"user", "partial", {}, {}, {}});
+    refresh_request_views(request);
 
     const auto result = client.complete(request);
     if (!require(!result.ok, "partial stream should fail")) {

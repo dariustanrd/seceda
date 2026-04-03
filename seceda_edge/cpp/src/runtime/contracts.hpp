@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -63,7 +64,7 @@ inline bool parse_route_target(const std::string & value, RouteTarget & target) 
         target = RouteTarget::kLocal;
         return true;
     }
-    if (value == "cloud") {
+    if (value == "cloud" || value == "remote") {
         target = RouteTarget::kCloud;
         return true;
     }
@@ -74,6 +75,7 @@ inline bool parse_route_target(const std::string & value, RouteTarget & target) 
 enum class InferenceErrorKind {
     kNone,
     kInvalidRequest,
+    kUnsupportedFeature,
     kLocalUnavailable,
     kLocalFailure,
     kCloudUnavailable,
@@ -86,6 +88,8 @@ inline const char * to_string(InferenceErrorKind kind) {
             return "none";
         case InferenceErrorKind::kInvalidRequest:
             return "invalid_request";
+        case InferenceErrorKind::kUnsupportedFeature:
+            return "unsupported_feature";
         case InferenceErrorKind::kLocalUnavailable:
             return "local_unavailable";
         case InferenceErrorKind::kLocalFailure:
@@ -99,22 +103,164 @@ inline const char * to_string(InferenceErrorKind kind) {
     return "unknown";
 }
 
+struct ExecutionTargetIdentity {
+    RouteTarget route_target = RouteTarget::kLocal;
+    std::string engine_id;
+    std::string backend_id;
+    std::string model_id;
+    std::string model_alias;
+    std::string display_name;
+    std::string execution_mode;
+    std::vector<std::string> capabilities;
+};
+
+struct ChatMessage {
+    std::string role = "user";
+    std::string content;
+    std::string name;
+    std::string tool_call_id;
+    std::string tool_calls_json;
+};
+
+struct ToolFunctionCall {
+    std::string name;
+    std::string arguments_json;
+};
+
+struct ToolCall {
+    std::string id;
+    std::string type = "function";
+    ToolFunctionCall function;
+};
+
+struct AssistantMessage {
+    std::string role = "assistant";
+    std::string content;
+    std::vector<ToolCall> tool_calls;
+    std::string refusal;
+};
+
 struct GenerationOptions {
-    int max_tokens = 128;
+    int max_completion_tokens = 128;
     float temperature = 0.7f;
     float top_p = 0.9f;
     int top_k = 40;
     float min_p = 0.05f;
     std::uint32_t seed = 0xFFFFFFFFu;
     bool use_chat_template = true;
+    bool stream = false;
+    bool include_usage_in_stream = false;
+};
+
+struct AdvancedRequestFields {
+    std::string tools_json;
+    std::string tool_choice_json;
+    std::string response_format_json;
+    std::vector<std::string> stop_sequences;
+    std::string user;
+};
+
+struct RequestCapabilities {
+    bool has_tools = false;
+    bool requests_tool_choice = false;
+    bool requests_structured_output = false;
+    bool requires_remote_backend = false;
+};
+
+struct NormalizedRequestText {
+    std::string system_prompt;
+    std::string latest_user_message;
+    std::string routing_prompt;
+};
+
+struct SecedaRequestContext {
+    RouteTarget route_override = RouteTarget::kAuto;
+    std::string preferred_engine_id;
+    std::string preferred_backend_id;
+    std::string preferred_model_alias;
+    std::string trace_id;
 };
 
 struct InferenceRequest {
-    std::string text;
-    std::string system_prompt;
-    RouteTarget route_override = RouteTarget::kAuto;
+    std::string model;
+    std::vector<ChatMessage> messages;
+    SecedaRequestContext seceda;
     GenerationOptions options;
+    AdvancedRequestFields advanced;
+    RequestCapabilities capabilities;
+    NormalizedRequestText normalized;
 };
+
+inline bool is_system_like_role(const std::string & role) {
+    return role == "system" || role == "developer";
+}
+
+inline bool is_user_like_role(const std::string & role) {
+    return role == "user";
+}
+
+inline bool has_system_like_message(const InferenceRequest & request) {
+    for (const auto & message : request.messages) {
+        if (is_system_like_role(message.role) && !message.content.empty()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+inline void refresh_request_views(InferenceRequest & request) {
+    request.normalized = {};
+    request.capabilities.requires_remote_backend =
+        request.capabilities.has_tools ||
+        request.capabilities.requests_tool_choice ||
+        request.capabilities.requests_structured_output;
+
+    for (const auto & message : request.messages) {
+        if (message.content.empty()) {
+            continue;
+        }
+
+        if (is_system_like_role(message.role)) {
+            if (!request.normalized.system_prompt.empty()) {
+                request.normalized.system_prompt += "\n\n";
+            }
+            request.normalized.system_prompt += message.content;
+        }
+
+        if (is_user_like_role(message.role)) {
+            request.normalized.latest_user_message = message.content;
+        }
+
+        if (!request.normalized.routing_prompt.empty()) {
+            request.normalized.routing_prompt.push_back('\n');
+        }
+
+        request.normalized.routing_prompt += message.role.empty() ? "message" : message.role;
+        if (!message.name.empty()) {
+            request.normalized.routing_prompt += "(" + message.name + ")";
+        }
+        request.normalized.routing_prompt += ": ";
+        request.normalized.routing_prompt += message.content;
+    }
+
+    if (request.normalized.latest_user_message.empty()) {
+        for (auto it = request.messages.rbegin(); it != request.messages.rend(); ++it) {
+            if (!it->content.empty()) {
+                request.normalized.latest_user_message = it->content;
+                break;
+            }
+        }
+    }
+}
+
+inline void prepend_system_message(InferenceRequest & request, const std::string & system_prompt) {
+    if (system_prompt.empty() || has_system_like_message(request)) {
+        return;
+    }
+
+    request.messages.insert(request.messages.begin(), ChatMessage{"system", system_prompt, {}});
+    refresh_request_views(request);
+}
 
 struct TimingInfo {
     double total_latency_ms = 0.0;
@@ -124,17 +270,26 @@ struct TimingInfo {
     int generated_tokens = 0;
 };
 
+inline int total_token_count(const TimingInfo & timing) {
+    return timing.prompt_tokens + timing.generated_tokens;
+}
+
 struct RouteDecision {
     RouteTarget target = RouteTarget::kLocal;
     std::string reason;
     std::vector<std::string> matched_rules;
     int estimated_tokens = 0;
+    std::string preferred_engine_id;
+    std::string resolved_backend_id;
+    std::string resolved_model_alias;
 };
 
 struct InferenceResponse {
     bool ok = false;
     InferenceErrorKind error_kind = InferenceErrorKind::kNone;
     std::string text;
+    AssistantMessage message;
+    std::string finish_reason = "stop";
     std::string error;
     RouteTarget requested_target = RouteTarget::kAuto;
     RouteTarget initial_target = RouteTarget::kLocal;
@@ -146,10 +301,19 @@ struct InferenceResponse {
     TimingInfo total_timing;
     std::optional<TimingInfo> local_timing;
     std::optional<TimingInfo> cloud_timing;
+    ExecutionTargetIdentity initial_identity;
+    ExecutionTargetIdentity final_identity;
     std::string active_model_path;
 };
 
 struct LocalModelConfig {
+    std::string engine_id = "local/llama.cpp";
+    std::string backend_id = "local";
+    std::string model_id = "local-default";
+    std::string model_alias = "local/default";
+    std::string display_name = "Seceda local llama.cpp";
+    std::string execution_mode = "in_process";
+    std::vector<std::string> capabilities = {"chat.completions", "text", "stream"};
     std::string model_path;
     int context_size = 2048;
     int batch_size = 2048;
@@ -196,8 +360,19 @@ struct RouterConfig {
 };
 
 struct CloudConfig {
-    std::string base_url;
+    std::string backend_id = "remote/modal-default";
     std::string model = "seceda-cloud-default";
+    std::string model_alias = "remote/default";
+    std::string display_name = "Seceda remote backend";
+    std::string execution_mode = "remote_service";
+    std::vector<std::string> capabilities = {
+        "chat.completions",
+        "text",
+        "stream",
+        "tools",
+        "response_format",
+    };
+    std::string base_url;
     std::string api_key;
     int timeout_seconds = 120;
     int connect_timeout_seconds = 10;
@@ -207,20 +382,37 @@ struct CloudConfig {
     bool verify_tls = true;
 };
 
+struct ModelCatalogEntry {
+    std::string id;
+    std::string display_name;
+    std::string owned_by = "seceda";
+};
+
 struct DaemonConfig {
     std::string host = "0.0.0.0";
     int port = 8080;
     std::string default_system_prompt;
     std::string warmup_prompt = "Hello from Seceda.";
+    std::string public_model_alias = "seceda/default";
     GenerationOptions default_generation;
     LocalModelConfig local;
     RouterConfig router;
     CloudConfig cloud;
     std::size_t event_log_capacity = 2048;
+    std::vector<ModelCatalogEntry> exposed_models = {
+        {"seceda/default", "Seceda default route", "seceda"},
+    };
 };
 
 struct LocalModelInfo {
     bool ready = false;
+    std::string engine_id;
+    std::string backend_id;
+    std::string model_id;
+    std::string model_alias;
+    std::string display_name;
+    std::string execution_mode;
+    std::vector<std::string> capabilities;
     std::string model_path;
     std::string description;
     std::string last_error;
@@ -236,8 +428,13 @@ struct LocalModelInfo {
 
 struct CloudClientInfo {
     bool configured = false;
-    std::string base_url;
+    std::string backend_id;
     std::string model;
+    std::string model_alias;
+    std::string display_name;
+    std::string execution_mode;
+    std::vector<std::string> capabilities;
+    std::string base_url;
     int timeout_seconds = 0;
     int connect_timeout_seconds = 0;
     int retry_attempts = 0;
@@ -265,6 +462,8 @@ struct InfoSnapshot {
     std::string host;
     int port = 0;
     std::string default_system_prompt;
+    std::string public_model_alias;
+    std::vector<ModelCatalogEntry> exposed_models;
     RouterConfig router_config;
     LocalModelInfo local_model;
     CloudClientInfo cloud_client;
@@ -281,6 +480,10 @@ struct InferenceEvent {
     InferenceErrorKind error_kind = InferenceErrorKind::kNone;
     std::string route_reason;
     std::string fallback_reason;
+    std::string engine_id;
+    std::string backend_id;
+    std::string model_id;
+    std::string model_alias;
     double total_latency_ms = 0.0;
     double local_latency_ms = 0.0;
     double cloud_latency_ms = 0.0;

@@ -7,16 +7,22 @@ namespace seceda::edge {
 struct LocalCompletionResult {
     bool ok = false;
     std::string text;
+    AssistantMessage message;
+    std::string finish_reason = "stop";
     std::string error;
     TimingInfo timing;
+    ExecutionTargetIdentity identity;
     std::string active_model_path;
 };
 
 struct CloudCompletionResult {
     bool ok = false;
     std::string text;
+    AssistantMessage message;
+    std::string finish_reason = "stop";
     std::string error;
     TimingInfo timing;
+    ExecutionTargetIdentity identity;
 };
 
 class ILocalModelRuntime {

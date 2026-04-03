@@ -42,9 +42,12 @@ bool EdgeDaemon::initialize() {
 }
 
 InferenceResponse EdgeDaemon::handle_inference(InferenceRequest request) {
-    if (request.system_prompt.empty()) {
+    {
         std::lock_guard<std::mutex> lock(mutex_);
-        request.system_prompt = config_.default_system_prompt;
+        if (request.model.empty()) {
+            request.model = config_.public_model_alias;
+        }
+        prepend_system_message(request, config_.default_system_prompt);
     }
 
     auto response = executor_.execute(request);
@@ -120,6 +123,8 @@ InfoSnapshot EdgeDaemon::info() const {
     snapshot.host = config_.host;
     snapshot.port = config_.port;
     snapshot.default_system_prompt = config_.default_system_prompt;
+    snapshot.public_model_alias = config_.public_model_alias;
+    snapshot.exposed_models = config_.exposed_models;
     snapshot.router_config = router_->config();
     snapshot.local_model = local_runtime_->info();
     snapshot.cloud_client = cloud_client_->info();

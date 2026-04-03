@@ -142,36 +142,6 @@ bool parse_sse_event(
     return !field_name.empty() && !payload.empty();
 }
 
-std::string extract_chat_content(const json & payload, bool & finished) {
-    finished = false;
-    if (!payload.contains("choices") || !payload["choices"].is_array() ||
-        payload["choices"].empty()) {
-        return {};
-    }
-
-    const auto & choice = payload["choices"][0];
-    if (choice.contains("finish_reason") && !choice["finish_reason"].is_null()) {
-        finished = true;
-    }
-
-    if (choice.contains("delta") && choice["delta"].is_object()) {
-        const auto & delta = choice["delta"];
-        if (delta.contains("content") && delta["content"].is_string()) {
-            return delta["content"].get<std::string>();
-        }
-    }
-
-    if (choice.contains("message") && choice["message"].is_object()) {
-        const auto & message = choice["message"];
-        if (message.contains("content") && message["content"].is_string()) {
-            finished = true;
-            return message["content"].get<std::string>();
-        }
-    }
-
-    return {};
-}
-
 int extract_completion_tokens(const json & payload) {
     if (!payload.contains("usage") || !payload["usage"].is_object() ||
         !payload["usage"].contains("completion_tokens") ||
@@ -205,6 +175,247 @@ void apply_usage_tokens(const json & payload, TimingInfo & timing) {
         payload["usage"]["completion_tokens"].is_number_integer()) {
         timing.generated_tokens = extract_completion_tokens(payload);
     }
+}
+
+bool parse_tool_call(const json & payload, ToolCall & tool_call, std::string & error) {
+    if (!payload.is_object()) {
+        error = "Tool call payload must be an object";
+        return false;
+    }
+
+    if (payload.contains("id") && payload["id"].is_string()) {
+        tool_call.id = payload["id"].get<std::string>();
+    }
+    if (payload.contains("type") && payload["type"].is_string()) {
+        tool_call.type = payload["type"].get<std::string>();
+    }
+
+    if (payload.contains("function")) {
+        if (!payload["function"].is_object()) {
+            error = "Tool call function payload must be an object";
+            return false;
+        }
+
+        const auto & function = payload["function"];
+        if (function.contains("name")) {
+            if (!function["name"].is_string()) {
+                error = "Tool call function.name must be a string";
+                return false;
+            }
+            tool_call.function.name = function["name"].get<std::string>();
+        }
+        if (function.contains("arguments")) {
+            if (function["arguments"].is_string()) {
+                tool_call.function.arguments_json = function["arguments"].get<std::string>();
+            } else {
+                tool_call.function.arguments_json = function["arguments"].dump();
+            }
+        }
+    }
+
+    return true;
+}
+
+bool apply_stream_delta(
+    const json & delta,
+    CloudCompletionResult & result,
+    std::string & error) {
+    if (!delta.is_object()) {
+        error = "Cloud delta payload must be an object";
+        return false;
+    }
+
+    if (delta.contains("role") && delta["role"].is_string()) {
+        result.message.role = delta["role"].get<std::string>();
+    }
+
+    if (delta.contains("content") && delta["content"].is_string()) {
+        const std::string content = delta["content"].get<std::string>();
+        result.message.content += content;
+        result.text += content;
+    }
+
+    if (delta.contains("tool_calls")) {
+        if (delta["tool_calls"].is_null()) {
+            return true;
+        }
+
+        json tool_calls = delta["tool_calls"];
+        if (tool_calls.is_object()) {
+            tool_calls = json::array({tool_calls});
+        }
+        if (!tool_calls.is_array()) {
+            error = "delta.tool_calls must be an array";
+            return false;
+        }
+
+        for (const auto & item : tool_calls) {
+            if (!item.is_object()) {
+                error = "delta.tool_calls entries must be objects";
+                return false;
+            }
+
+            std::size_t index = result.message.tool_calls.size();
+            if (item.contains("index")) {
+                if (!item["index"].is_number_unsigned()) {
+                    error = "delta.tool_calls.index must be an unsigned integer";
+                    return false;
+                }
+                index = item["index"].get<std::size_t>();
+            }
+
+            while (result.message.tool_calls.size() <= index) {
+                result.message.tool_calls.push_back(ToolCall{});
+            }
+
+            ToolCall update = result.message.tool_calls[index];
+            if (!parse_tool_call(item, update, error)) {
+                return false;
+            }
+
+            if (item.contains("function") &&
+                item["function"].is_object() &&
+                item["function"].contains("arguments") &&
+                item["function"]["arguments"].is_string()) {
+                const std::string delta_arguments =
+                    item["function"]["arguments"].get<std::string>();
+                if (!result.message.tool_calls[index].function.arguments_json.empty() &&
+                    result.message.tool_calls[index].function.arguments_json != delta_arguments) {
+                    update.function.arguments_json =
+                        result.message.tool_calls[index].function.arguments_json + delta_arguments;
+                }
+            }
+
+            result.message.tool_calls[index] = std::move(update);
+        }
+    }
+
+    return true;
+}
+
+bool apply_full_message(
+    const json & message,
+    CloudCompletionResult & result,
+    std::string & error) {
+    if (!message.is_object()) {
+        error = "Cloud message payload must be an object";
+        return false;
+    }
+
+    if (message.contains("role") && message["role"].is_string()) {
+        result.message.role = message["role"].get<std::string>();
+    }
+
+    if (message.contains("content")) {
+        if (message["content"].is_string()) {
+            result.message.content = message["content"].get<std::string>();
+            result.text = result.message.content;
+        } else if (!message["content"].is_null()) {
+            error = "Cloud message content must be a string or null";
+            return false;
+        }
+    }
+
+    if (message.contains("refusal") && message["refusal"].is_string()) {
+        result.message.refusal = message["refusal"].get<std::string>();
+    }
+
+    if (message.contains("tool_calls")) {
+        if (message["tool_calls"].is_null()) {
+            return true;
+        }
+
+        json tool_calls = message["tool_calls"];
+        if (tool_calls.is_object()) {
+            tool_calls = json::array({tool_calls});
+        }
+        if (!tool_calls.is_array()) {
+            error = "Cloud message tool_calls must be an array";
+            return false;
+        }
+
+        result.message.tool_calls.clear();
+        for (const auto & item : tool_calls) {
+            ToolCall tool_call;
+            if (!parse_tool_call(item, tool_call, error)) {
+                return false;
+            }
+            result.message.tool_calls.push_back(std::move(tool_call));
+        }
+    }
+
+    return true;
+}
+
+bool apply_completion_payload(
+    const json & payload,
+    CloudCompletionResult & result,
+    bool streaming_payload,
+    bool & finished,
+    std::string & error) {
+    finished = false;
+    if (streaming_payload &&
+        payload.contains("choices") &&
+        payload["choices"].is_array() &&
+        payload["choices"].empty()) {
+        return true;
+    }
+
+    if (!payload.contains("choices") || !payload["choices"].is_array() ||
+        payload["choices"].empty()) {
+        error = "Cloud response must contain a non-empty choices array";
+        return false;
+    }
+
+    const auto & choice = payload["choices"][0];
+    if (!choice.is_object()) {
+        error = "Cloud choice payload must be an object";
+        return false;
+    }
+
+    if (choice.contains("finish_reason") && !choice["finish_reason"].is_null()) {
+        if (!choice["finish_reason"].is_string()) {
+            error = "Cloud finish_reason must be a string";
+            return false;
+        }
+        result.finish_reason = choice["finish_reason"].get<std::string>();
+        finished = true;
+    }
+
+    if (streaming_payload) {
+        if (choice.contains("delta")) {
+            return apply_stream_delta(choice["delta"], result, error);
+        }
+        return true;
+    }
+
+    if (choice.contains("message")) {
+        return apply_full_message(choice["message"], result, error);
+    }
+
+    error = "Cloud response did not include a message payload";
+    return false;
+}
+
+json build_message_payload(const ChatMessage & message) {
+    json payload = {
+        {"role", message.role},
+        {"content", message.content},
+    };
+    if (!message.name.empty()) {
+        payload["name"] = message.name;
+    }
+    if (!message.tool_call_id.empty()) {
+        payload["tool_call_id"] = message.tool_call_id;
+    }
+    if (!message.tool_calls_json.empty()) {
+        payload["tool_calls"] = json::parse(message.tool_calls_json);
+    }
+    return payload;
+}
+
+bool wants_rich_openai_response(const InferenceRequest & request) {
+    return request.capabilities.has_tools || request.capabilities.requests_tool_choice;
 }
 
 std::string generate_modal_session_id() {
@@ -281,15 +492,23 @@ size_t curl_write_callback(char * data, size_t size, size_t count, void * user_d
         try {
             const json parsed_payload = json::parse(payload);
             bool finished = false;
-            const std::string content = extract_chat_content(parsed_payload, finished);
-            if (!content.empty()) {
+            if (!apply_completion_payload(
+                    parsed_payload,
+                    *state.result,
+                    true,
+                    finished,
+                    state.parser_error)) {
+                return 0;
+            }
+
+            if (!state.result->timing.has_ttft &&
+                (!state.result->text.empty() || !state.result->message.tool_calls.empty())) {
                 if (!state.result->timing.has_ttft) {
                     state.result->timing.has_ttft = true;
                     state.result->timing.ttft_ms = std::chrono::duration<double, std::milli>(
                         std::chrono::steady_clock::now() - state.request_start)
                                                         .count();
                 }
-                state.result->text += content;
             }
             apply_usage_tokens(parsed_payload, state.result->timing);
             if (finished) {
@@ -316,8 +535,13 @@ bool CloudClient::is_configured() const {
 CloudClientInfo CloudClient::info() const {
     CloudClientInfo info;
     info.configured = is_configured();
+    info.backend_id = config_.backend_id;
     info.base_url = config_.base_url;
     info.model = config_.model;
+    info.model_alias = config_.model_alias;
+    info.display_name = config_.display_name;
+    info.execution_mode = config_.execution_mode;
+    info.capabilities = config_.capabilities;
     info.timeout_seconds = config_.timeout_seconds;
     info.connect_timeout_seconds = config_.connect_timeout_seconds;
     info.retry_attempts = config_.retry_attempts;
@@ -339,13 +563,23 @@ CloudCompletionResult CloudClient::complete(const InferenceRequest & request) {
         return result;
     }
 
+    result.message.role = "assistant";
+    result.identity.route_target = RouteTarget::kCloud;
+    result.identity.backend_id = config_.backend_id;
+    result.identity.model_id = config_.model;
+    result.identity.model_alias = config_.model_alias;
+    result.identity.display_name = config_.display_name;
+    result.identity.execution_mode = config_.execution_mode;
+    result.identity.capabilities = config_.capabilities;
+
+    const bool upstream_stream = !wants_rich_openai_response(request);
     json body = {
         {"model", config_.model},
         {"messages", json::array()},
-        {"max_tokens", request.options.max_tokens},
+        {"max_tokens", request.options.max_completion_tokens},
         {"temperature", request.options.temperature},
         {"top_p", request.options.top_p},
-        {"stream", true},
+        {"stream", upstream_stream},
     };
 
     if (request.options.top_k > 0) {
@@ -358,11 +592,34 @@ CloudCompletionResult CloudClient::complete(const InferenceRequest & request) {
         body["seed"] = request.options.seed;
     }
 
-    if (!request.system_prompt.empty()) {
-        body["messages"].push_back(
-            {{"role", "system"}, {"content", request.system_prompt}});
+    for (const auto & message : request.messages) {
+        body["messages"].push_back(build_message_payload(message));
     }
-    body["messages"].push_back({{"role", "user"}, {"content", request.text}});
+
+    if (!request.advanced.user.empty()) {
+        body["user"] = request.advanced.user;
+    }
+    if (!request.advanced.stop_sequences.empty()) {
+        body["stop"] = request.advanced.stop_sequences;
+    }
+    try {
+        if (!request.advanced.tools_json.empty()) {
+            body["tools"] = json::parse(request.advanced.tools_json);
+        }
+        if (!request.advanced.tool_choice_json.empty()) {
+            body["tool_choice"] = json::parse(request.advanced.tool_choice_json);
+        }
+        if (!request.advanced.response_format_json.empty()) {
+            body["response_format"] = json::parse(request.advanced.response_format_json);
+        }
+    } catch (const std::exception & exception) {
+        result.error = std::string("Failed to serialize cloud request JSON: ") + exception.what();
+        return result;
+    }
+    if (upstream_stream && request.options.include_usage_in_stream) {
+        body["stream_options"] = {{"include_usage", true}};
+    }
+
     const std::string body_string = body.dump();
     const std::string request_url = completion_url(config_.base_url);
     const auto request_start = std::chrono::steady_clock::now();
@@ -474,7 +731,11 @@ CloudCompletionResult CloudClient::complete(const InferenceRequest & request) {
             try {
                 const json payload = json::parse(stream_state.raw_body);
                 bool finished = false;
-                result.text = extract_chat_content(payload, finished);
+                std::string parse_error;
+                if (!apply_completion_payload(payload, result, false, finished, parse_error)) {
+                    result.error = parse_error;
+                    return result;
+                }
                 apply_usage_tokens(payload, result.timing);
                 result.ok = true;
                 return result;

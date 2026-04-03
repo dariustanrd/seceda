@@ -51,8 +51,9 @@ int main(int argc, char ** argv) {
     }
 
     InferenceRequest request;
-    request.text = prompt;
-    request.options.max_tokens = max_tokens;
+    request.messages.push_back({"user", prompt, {}, {}, {}});
+    refresh_request_views(request);
+    request.options.max_completion_tokens = max_tokens;
 
     const auto response = runtime.generate(request);
     if (!response.ok) {

@@ -13,10 +13,25 @@ RouteDecision HeuristicRouter::decide(const InferenceRequest & request) const {
     RouteDecision decision;
     decision.target = RouteTarget::kLocal;
 
-    const std::string lowered = to_lower_ascii(request.text);
+    const std::string lowered = to_lower_ascii(request.normalized.routing_prompt);
     decision.estimated_tokens = estimate_token_count(lowered);
 
-    if (request.text.size() > config_.max_prompt_chars) {
+    if (request.capabilities.requires_remote_backend) {
+        decision.target = RouteTarget::kCloud;
+        decision.reason = "remote_capability_required";
+        if (request.capabilities.has_tools) {
+            decision.matched_rules.push_back("tools");
+        }
+        if (request.capabilities.requests_tool_choice) {
+            decision.matched_rules.push_back("tool_choice");
+        }
+        if (request.capabilities.requests_structured_output) {
+            decision.matched_rules.push_back("response_format");
+        }
+        return decision;
+    }
+
+    if (request.normalized.routing_prompt.size() > config_.max_prompt_chars) {
         decision.target = RouteTarget::kCloud;
         decision.reason = "prompt_too_long";
         decision.matched_rules.push_back("max_prompt_chars");
