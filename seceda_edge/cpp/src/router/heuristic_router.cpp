@@ -12,6 +12,9 @@ HeuristicRouter::HeuristicRouter(RouterConfig config) : config_(std::move(config
 RouteDecision HeuristicRouter::decide(const InferenceRequest & request) const {
     RouteDecision decision;
     decision.target = RouteTarget::kLocal;
+    decision.preferred_engine_id = request.seceda.preferred_engine_id;
+    decision.resolved_backend_id = request.seceda.preferred_backend_id;
+    decision.resolved_model_alias = request.seceda.preferred_model_alias;
 
     const std::string lowered = to_lower_ascii(request.normalized.routing_prompt);
     decision.estimated_tokens = estimate_token_count(lowered);

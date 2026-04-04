@@ -1,0 +1,3 @@
+# compile_commands.json lives under build/${presetName}/ (CMakePresets.json); clangd does not search there by default.
+CompileFlags:
+  CompilationDatabase: build/native-debug

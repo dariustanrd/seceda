@@ -1,0 +1,11 @@
+seceda_add_edge_library(
+    seceda_edge_openai_compat
+    SOURCES
+        openai_models.cpp
+        openai_parse.cpp
+        openai_wire.cpp
+        openai_errors.cpp
+    EXTRA_LIBS
+        seceda_edge_runtime
+        seceda_edge_httplib
+)

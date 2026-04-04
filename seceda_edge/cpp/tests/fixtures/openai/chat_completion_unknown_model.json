@@ -1,0 +1,6 @@
+{
+  "model": "not-in-catalog",
+  "messages": [
+    { "role": "user", "content": "Hello" }
+  ]
+}

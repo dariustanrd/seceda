@@ -1,18 +1,17 @@
 #include "cloud_bridge/cloud_client.hpp"
-#include "local_models/llama_runtime.hpp"
+#include "local_models/local_engine_registry.hpp"
 #include "router/heuristic_router.hpp"
+#include "openai_compat/openai_compat.hpp"
 #include "runtime/edge_daemon.hpp"
 #include "runtime/runtime_config.hpp"
 
 #include <cpp-httplib/httplib.h>
 #include <nlohmann/json.hpp>
 
-#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -20,6 +19,7 @@ namespace {
 
 using json = nlohmann::json;
 using namespace seceda::edge;
+namespace oa = seceda::edge::openai_compat;
 
 json router_config_to_json(const RouterConfig & config) {
     return {
@@ -28,16 +28,6 @@ json router_config_to_json(const RouterConfig & config) {
         {"structured_keywords", config.structured_keywords},
         {"cloud_keywords", config.cloud_keywords},
         {"freshness_keywords", config.freshness_keywords},
-    };
-}
-
-json model_catalog_entry_to_json(const ModelCatalogEntry & entry) {
-    return {
-        {"id", entry.id},
-        {"object", "model"},
-        {"created", 0},
-        {"owned_by", entry.owned_by},
-        {"display_name", entry.display_name},
     };
 }
 
@@ -97,7 +87,7 @@ json health_to_json(const HealthSnapshot & health) {
 json info_to_json(const InfoSnapshot & info) {
     json exposed_models = json::array();
     for (const auto & model : info.exposed_models) {
-        exposed_models.push_back(model_catalog_entry_to_json(model));
+        exposed_models.push_back(oa::model_catalog_entry_json(model));
     }
 
     return {
@@ -138,70 +128,13 @@ json execution_target_to_json(const ExecutionTargetIdentity & identity) {
     };
 }
 
-json tool_call_to_json(const ToolCall & tool_call) {
-    return {
-        {"id", tool_call.id},
-        {"type", tool_call.type},
-        {"function",
-         {
-             {"name", tool_call.function.name},
-             {"arguments", tool_call.function.arguments_json},
-         }},
-    };
-}
-
-json assistant_message_to_json(const AssistantMessage & message) {
-    json payload = {
-        {"role", message.role.empty() ? "assistant" : message.role},
-        {"content", message.content.empty() && !message.tool_calls.empty() ? json(nullptr)
-                                                                            : json(message.content)},
-    };
-
-    if (!message.refusal.empty()) {
-        payload["refusal"] = message.refusal;
-    }
-
-    if (!message.tool_calls.empty()) {
-        payload["tool_calls"] = json::array();
-        for (const auto & tool_call : message.tool_calls) {
-            payload["tool_calls"].push_back(tool_call_to_json(tool_call));
-        }
-    }
-
-    return payload;
-}
-
-TimingInfo usage_timing_for_response(const InferenceResponse & response) {
-    if (response.final_target == RouteTarget::kLocal && response.local_timing.has_value()) {
-        return *response.local_timing;
-    }
-    if (response.final_target == RouteTarget::kCloud && response.cloud_timing.has_value()) {
-        return *response.cloud_timing;
-    }
-    if (response.local_timing.has_value()) {
-        return *response.local_timing;
-    }
-    if (response.cloud_timing.has_value()) {
-        return *response.cloud_timing;
-    }
-    return response.total_timing;
-}
-
-json usage_to_json(const TimingInfo & timing) {
-    return {
-        {"prompt_tokens", timing.prompt_tokens},
-        {"completion_tokens", timing.generated_tokens},
-        {"total_tokens", total_token_count(timing)},
-    };
-}
-
 json response_to_json(const InferenceResponse & response) {
     json payload = {
         {"ok", response.ok},
         {"error_kind", to_string(response.error_kind)},
         {"error", response.error},
         {"text", response.text},
-        {"message", assistant_message_to_json(response.message)},
+        {"message", oa::assistant_message_json(response.message)},
         {"finish_reason", response.finish_reason},
         {"requested_target", to_string(response.requested_target)},
         {"initial_target", to_string(response.initial_target)},
@@ -280,378 +213,6 @@ bool read_float(const json & object, const char * key, float & out) {
     return true;
 }
 
-std::vector<ModelCatalogEntry> configured_model_catalog(const DaemonConfig & config) {
-    std::vector<ModelCatalogEntry> models = config.exposed_models;
-
-    auto add_unique = [&](const std::string & id, const std::string & display_name) {
-        if (id.empty()) {
-            return;
-        }
-
-        for (const auto & model : models) {
-            if (model.id == id) {
-                return;
-            }
-        }
-
-        models.push_back({id, display_name.empty() ? id : display_name, "seceda"});
-    };
-
-    add_unique(config.public_model_alias, "Seceda default route");
-    if (!config.local.model_alias.empty()) {
-        add_unique(config.local.model_alias, config.local.display_name);
-    }
-    if (!config.cloud.model_alias.empty()) {
-        add_unique(config.cloud.model_alias, config.cloud.display_name);
-    }
-
-    return models;
-}
-
-bool is_known_model(const std::vector<ModelCatalogEntry> & models, const std::string & model_id) {
-    for (const auto & model : models) {
-        if (model.id == model_id) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool read_text_message_content(
-    const json & content,
-    std::string & out,
-    std::string & error) {
-    out.clear();
-    if (content.is_null()) {
-        return true;
-    }
-    if (content.is_string()) {
-        out = content.get<std::string>();
-        return true;
-    }
-    if (!content.is_array()) {
-        error = "message.content must be a string, null, or an array of text parts";
-        return false;
-    }
-
-    for (const auto & part : content) {
-        if (!part.is_object()) {
-            error = "message.content parts must be objects";
-            return false;
-        }
-        if (!part.contains("type") || !part["type"].is_string()) {
-            error = "message.content parts must contain a string type";
-            return false;
-        }
-
-        const std::string type = part["type"].get<std::string>();
-        if (type != "text" && type != "input_text") {
-            error = "Only text content parts are supported in phase 1";
-            return false;
-        }
-        if (!part.contains("text") || !part["text"].is_string()) {
-            error = "Text content parts must contain a string text field";
-            return false;
-        }
-
-        out += part["text"].get<std::string>();
-    }
-
-    return true;
-}
-
-bool parse_chat_message(
-    const json & payload,
-    ChatMessage & message,
-    std::string & error) {
-    if (!payload.is_object()) {
-        error = "Each message must be a JSON object";
-        return false;
-    }
-    if (!payload.contains("role") || !payload["role"].is_string()) {
-        error = "Each message must contain a string role";
-        return false;
-    }
-
-    message.role = payload["role"].get<std::string>();
-    if (message.role == "function") {
-        message.role = "tool";
-    }
-
-    if (message.role != "system" &&
-        message.role != "developer" &&
-        message.role != "user" &&
-        message.role != "assistant" &&
-        message.role != "tool") {
-        error = "Unsupported message role: " + message.role;
-        return false;
-    }
-
-    if (payload.contains("name")) {
-        if (!payload["name"].is_string()) {
-            error = "message.name must be a string when provided";
-            return false;
-        }
-        message.name = payload["name"].get<std::string>();
-    }
-
-    if (payload.contains("tool_call_id")) {
-        if (!payload["tool_call_id"].is_string()) {
-            error = "message.tool_call_id must be a string when provided";
-            return false;
-        }
-        message.tool_call_id = payload["tool_call_id"].get<std::string>();
-    }
-
-    if (payload.contains("tool_calls")) {
-        if (!payload["tool_calls"].is_array()) {
-            error = "message.tool_calls must be an array when provided";
-            return false;
-        }
-        message.tool_calls_json = payload["tool_calls"].dump();
-    }
-
-    if (!payload.contains("content")) {
-        error = "Each message must contain a content field";
-        return false;
-    }
-
-    return read_text_message_content(payload["content"], message.content, error);
-}
-
-bool read_stop_sequences(
-    const json & payload,
-    std::vector<std::string> & out,
-    std::string & error) {
-    out.clear();
-    if (payload.is_string()) {
-        out.push_back(payload.get<std::string>());
-        return true;
-    }
-    if (!payload.is_array()) {
-        error = "stop must be a string or an array of strings";
-        return false;
-    }
-
-    for (const auto & item : payload) {
-        if (!item.is_string()) {
-            error = "stop entries must be strings";
-            return false;
-        }
-        out.push_back(item.get<std::string>());
-    }
-
-    return true;
-}
-
-bool read_completion_token_limit(
-    const json & payload,
-    int & out,
-    std::string & error) {
-    std::optional<int> max_tokens;
-    std::optional<int> max_completion_tokens;
-
-    if (payload.contains("max_tokens")) {
-        if (!payload["max_tokens"].is_number_integer()) {
-            error = "max_tokens must be an integer when provided";
-            return false;
-        }
-        max_tokens = payload["max_tokens"].get<int>();
-    }
-
-    if (payload.contains("max_completion_tokens")) {
-        if (!payload["max_completion_tokens"].is_number_integer()) {
-            error = "max_completion_tokens must be an integer when provided";
-            return false;
-        }
-        max_completion_tokens = payload["max_completion_tokens"].get<int>();
-    }
-
-    if (max_tokens.has_value() &&
-        max_completion_tokens.has_value() &&
-        *max_tokens != *max_completion_tokens) {
-        error = "max_tokens and max_completion_tokens must match when both are provided";
-        return false;
-    }
-
-    if (max_completion_tokens.has_value()) {
-        out = *max_completion_tokens;
-    } else if (max_tokens.has_value()) {
-        out = *max_tokens;
-    }
-
-    return true;
-}
-
-bool read_stream_options(
-    const json & payload,
-    bool & include_usage,
-    std::string & error) {
-    if (!payload.is_object()) {
-        error = "stream_options must be an object when provided";
-        return false;
-    }
-
-    if (payload.contains("include_usage")) {
-        if (!payload["include_usage"].is_boolean()) {
-            error = "stream_options.include_usage must be a boolean";
-            return false;
-        }
-        include_usage = payload["include_usage"].get<bool>();
-    }
-
-    return true;
-}
-
-bool parse_openai_request_features(
-    const json & payload,
-    InferenceRequest & request,
-    std::string & error) {
-    if (payload.contains("user")) {
-        if (!payload["user"].is_string()) {
-            error = "user must be a string when provided";
-            return false;
-        }
-        request.advanced.user = payload["user"].get<std::string>();
-    }
-
-    if (payload.contains("stop")) {
-        if (!read_stop_sequences(payload["stop"], request.advanced.stop_sequences, error)) {
-            return false;
-        }
-    }
-
-    if (payload.contains("tools")) {
-        if (!payload["tools"].is_array()) {
-            error = "tools must be an array when provided";
-            return false;
-        }
-        request.advanced.tools_json = payload["tools"].dump();
-        request.capabilities.has_tools = !payload["tools"].empty();
-    }
-
-    if (payload.contains("tool_choice") && !payload["tool_choice"].is_null()) {
-        if (!payload["tool_choice"].is_string() && !payload["tool_choice"].is_object()) {
-            error = "tool_choice must be a string or object when provided";
-            return false;
-        }
-        request.advanced.tool_choice_json = payload["tool_choice"].dump();
-        request.capabilities.requests_tool_choice =
-            !(payload["tool_choice"].is_string() &&
-              payload["tool_choice"].get<std::string>() == "none");
-    }
-
-    if (payload.contains("response_format") && !payload["response_format"].is_null()) {
-        if (!payload["response_format"].is_string() && !payload["response_format"].is_object()) {
-            error = "response_format must be a string or object when provided";
-            return false;
-        }
-        request.advanced.response_format_json = payload["response_format"].dump();
-        if (payload["response_format"].is_string()) {
-            request.capabilities.requests_structured_output =
-                payload["response_format"].get<std::string>() != "text";
-        } else {
-            const auto & response_format = payload["response_format"];
-            request.capabilities.requests_structured_output =
-                !response_format.contains("type") ||
-                !response_format["type"].is_string() ||
-                response_format["type"].get<std::string>() != "text";
-        }
-    }
-
-    return true;
-}
-
-bool parse_chat_completion_request(
-    const std::string & body,
-    const DaemonConfig & config,
-    InferenceRequest & request,
-    std::string & error) {
-    json parsed;
-    try {
-        parsed = json::parse(body);
-    } catch (const std::exception & exception) {
-        error = std::string("Invalid JSON: ") + exception.what();
-        return false;
-    }
-
-    if (!parsed.is_object()) {
-        error = "Request body must be a JSON object";
-        return false;
-    }
-
-    request = {};
-    request.options = config.default_generation;
-
-    const auto model_catalog = configured_model_catalog(config);
-    if (parsed.contains("model") && !parsed["model"].is_null()) {
-        if (!parsed["model"].is_string()) {
-            error = "model must be a string when provided";
-            return false;
-        }
-        request.model = parsed["model"].get<std::string>();
-    } else if (!model_catalog.empty()) {
-        request.model = model_catalog.front().id;
-    } else {
-        request.model = config.public_model_alias;
-    }
-
-    if (!is_known_model(model_catalog, request.model)) {
-        error = "Unknown model '" + request.model + "'";
-        return false;
-    }
-
-    if (!parsed.contains("messages") || !parsed["messages"].is_array()) {
-        error = "messages must be a JSON array";
-        return false;
-    }
-
-    for (const auto & message_payload : parsed["messages"]) {
-        ChatMessage message;
-        if (!parse_chat_message(message_payload, message, error)) {
-            return false;
-        }
-        request.messages.push_back(std::move(message));
-    }
-
-    if (parsed.contains("stream")) {
-        if (!parsed["stream"].is_boolean()) {
-            error = "stream must be a boolean when provided";
-            return false;
-        }
-        request.options.stream = parsed["stream"].get<bool>();
-    }
-
-    if (parsed.contains("stream_options")) {
-        if (!read_stream_options(
-                parsed["stream_options"],
-                request.options.include_usage_in_stream,
-                error)) {
-            return false;
-        }
-    }
-
-    if (!read_completion_token_limit(parsed, request.options.max_completion_tokens, error) ||
-        !read_float(parsed, "temperature", request.options.temperature) ||
-        !read_float(parsed, "top_p", request.options.top_p) ||
-        !read_int(parsed, "top_k", request.options.top_k) ||
-        !read_float(parsed, "min_p", request.options.min_p) ||
-        !read_uint(parsed, "seed", request.options.seed)) {
-        if (error.empty()) {
-            error = "One or more generation controls had an invalid type";
-        }
-        return false;
-    }
-
-    if (!parse_openai_request_features(parsed, request, error)) {
-        return false;
-    }
-
-    request.seceda.preferred_model_alias = request.model;
-    refresh_request_views(request);
-    return true;
-}
-
 bool parse_inference_request(
     const std::string & body,
     const DaemonConfig & config,
@@ -702,7 +263,7 @@ bool parse_inference_request(
         }
 
         const auto & options = parsed["options"];
-        if (!read_completion_token_limit(options, request.options.max_completion_tokens, error) ||
+        if (!oa::read_completion_token_limit(options, request.options.max_completion_tokens, error) ||
             !read_float(options, "temperature", request.options.temperature) ||
             !read_float(options, "top_p", request.options.top_p) ||
             !read_int(options, "top_k", request.options.top_k) ||
@@ -751,167 +312,8 @@ int http_status_for_state(RuntimeState state) {
     return state == RuntimeState::kReady || state == RuntimeState::kDegraded ? 200 : 503;
 }
 
-int http_status_for_response(const InferenceResponse & response) {
-    if (response.ok) {
-        return 200;
-    }
-
-    switch (response.error_kind) {
-        case InferenceErrorKind::kInvalidRequest:
-        case InferenceErrorKind::kUnsupportedFeature:
-            return 400;
-        case InferenceErrorKind::kLocalUnavailable:
-        case InferenceErrorKind::kCloudUnavailable:
-            return 503;
-        case InferenceErrorKind::kLocalFailure:
-        case InferenceErrorKind::kCloudFailure:
-            return 502;
-        case InferenceErrorKind::kNone:
-            return 500;
-    }
-
-    return 500;
-}
-
-std::string openai_error_type(const InferenceResponse & response) {
-    switch (response.error_kind) {
-        case InferenceErrorKind::kInvalidRequest:
-        case InferenceErrorKind::kUnsupportedFeature:
-            return "invalid_request_error";
-        case InferenceErrorKind::kLocalUnavailable:
-        case InferenceErrorKind::kCloudUnavailable:
-        case InferenceErrorKind::kLocalFailure:
-        case InferenceErrorKind::kCloudFailure:
-        case InferenceErrorKind::kNone:
-            return "server_error";
-    }
-
-    return "server_error";
-}
-
-json openai_error_payload(
-    const std::string & message,
-    const std::string & type,
-    const std::string & param = {},
-    const std::string & code = {}) {
-    json error = {
-        {"message", message},
-        {"type", type},
-        {"param", param.empty() ? json(nullptr) : json(param)},
-        {"code", code.empty() ? json(nullptr) : json(code)},
-    };
-    return {{"error", std::move(error)}};
-}
-
-void set_openai_error(
-    httplib::Response & response,
-    int status,
-    const std::string & message,
-    const std::string & type,
-    const std::string & param = {},
-    const std::string & code = {}) {
-    response.status = status;
-    response.set_content(
-        openai_error_payload(message, type, param, code).dump(),
-        "application/json");
-}
-
-std::int64_t unix_timestamp_now() {
-    return std::chrono::duration_cast<std::chrono::seconds>(
-               std::chrono::system_clock::now().time_since_epoch())
-        .count();
-}
-
-std::string make_chat_completion_id() {
-    static std::atomic<std::uint64_t> next_id{1};
-    return "chatcmpl-seceda-" + std::to_string(unix_timestamp_now()) + "-" +
-        std::to_string(next_id.fetch_add(1));
-}
-
-json openai_chat_completion_response(
-    const InferenceRequest & request,
-    const InferenceResponse & response,
-    const std::string & completion_id,
-    std::int64_t created_at) {
-    json choices = json::array();
-    choices.push_back(
-        {
-            {"index", 0},
-            {"message", assistant_message_to_json(response.message)},
-            {"finish_reason", response.finish_reason.empty() ? "stop" : response.finish_reason},
-        });
-
-    return {
-        {"id", completion_id},
-        {"object", "chat.completion"},
-        {"created", created_at},
-        {"model", request.model},
-        {"choices", std::move(choices)},
-        {"usage", usage_to_json(usage_timing_for_response(response))},
-    };
-}
-
-std::string sse_event(const json & payload) {
-    return "data: " + payload.dump() + "\n\n";
-}
-
-std::string openai_chat_completion_sse(
-    const InferenceRequest & request,
-    const InferenceResponse & response,
-    const std::string & completion_id,
-    std::int64_t created_at) {
-    const auto chunk_base = [&](const json & delta, const json & finish_reason) {
-        json choices = json::array();
-        choices.push_back(
-            {
-                {"index", 0},
-                {"delta", delta},
-                {"finish_reason", finish_reason},
-            });
-
-        return json{
-            {"id", completion_id},
-            {"object", "chat.completion.chunk"},
-            {"created", created_at},
-            {"model", request.model},
-            {"choices", std::move(choices)},
-        };
-    };
-
-    std::string stream;
-    stream += sse_event(chunk_base(json{{"role", "assistant"}}, nullptr));
-
-    if (!response.message.content.empty()) {
-        stream += sse_event(chunk_base(json{{"content", response.message.content}}, nullptr));
-    }
-
-    if (!response.message.tool_calls.empty()) {
-        json tool_calls = json::array();
-        for (const auto & tool_call : response.message.tool_calls) {
-            tool_calls.push_back(tool_call_to_json(tool_call));
-        }
-        stream += sse_event(chunk_base(json{{"tool_calls", std::move(tool_calls)}}, nullptr));
-    }
-
-    stream += sse_event(
-        chunk_base(
-            json::object(),
-            response.finish_reason.empty() ? json("stop") : json(response.finish_reason)));
-
-    if (request.options.include_usage_in_stream) {
-        stream += sse_event(
-            json{
-                {"id", completion_id},
-                {"object", "chat.completion.chunk"},
-                {"created", created_at},
-                {"model", request.model},
-                {"choices", json::array()},
-                {"usage", usage_to_json(usage_timing_for_response(response))},
-            });
-    }
-
-    stream += "data: [DONE]\n\n";
-    return stream;
+int http_status_for_inference_response(const InferenceResponse & response) {
+    return oa::http_status_for_inference(response);
 }
 
 }  // namespace
@@ -929,7 +331,7 @@ int main(int argc, char ** argv) {
         return 0;
     }
 
-    auto local_runtime = std::make_shared<LlamaRuntime>();
+    auto local_runtime = std::make_shared<LocalEngineRegistry>();
     auto cloud_client = std::make_shared<CloudClient>(config.cloud);
     auto router = std::make_shared<HeuristicRouter>(config.router);
 
@@ -983,42 +385,34 @@ int main(int argc, char ** argv) {
     });
 
     server.Get("/v1/models", [&](const httplib::Request &, httplib::Response & response) {
-        json payload = {
-            {"object", "list"},
-            {"data", json::array()},
-        };
-        for (const auto & model : configured_model_catalog(config)) {
-            payload["data"].push_back(model_catalog_entry_to_json(model));
-        }
-
-        response.set_content(payload.dump(), "application/json");
+        response.set_content(oa::models_list_payload(config).dump(), "application/json");
     });
 
     server.Post("/v1/chat/completions", [&](const httplib::Request & request, httplib::Response & response) {
         InferenceRequest inference_request;
         std::string error;
-        if (!parse_chat_completion_request(request.body, config, inference_request, error)) {
-            set_openai_error(response, 400, error, "invalid_request_error");
+        if (!oa::parse_chat_completion_request(request.body, config, inference_request, error)) {
+            oa::set_openai_error(response, 400, error, "invalid_request_error");
             return;
         }
 
         const auto inference_response = daemon.handle_inference(inference_request);
         if (!inference_response.ok) {
-            set_openai_error(
+            oa::set_openai_error(
                 response,
-                http_status_for_response(inference_response),
+                oa::http_status_for_inference(inference_response),
                 inference_response.error.empty() ? "Inference request failed" : inference_response.error,
-                openai_error_type(inference_response));
+                oa::openai_error_type(inference_response));
             return;
         }
 
-        const std::string completion_id = make_chat_completion_id();
-        const std::int64_t created_at = unix_timestamp_now();
+        const std::string completion_id = oa::make_chat_completion_id();
+        const std::int64_t created_at = oa::unix_timestamp_now();
         if (inference_request.options.stream) {
             response.status = 200;
             response.set_header("Cache-Control", "no-cache");
             response.set_content(
-                openai_chat_completion_sse(
+                oa::chat_completion_sse(
                     inference_request,
                     inference_response,
                     completion_id,
@@ -1028,7 +422,7 @@ int main(int argc, char ** argv) {
         }
 
         response.set_content(
-            openai_chat_completion_response(
+            oa::chat_completion_response(
                 inference_request,
                 inference_response,
                 completion_id,
@@ -1047,7 +441,7 @@ int main(int argc, char ** argv) {
         }
 
         const auto inference_response = daemon.handle_inference(std::move(inference_request));
-        response.status = http_status_for_response(inference_response);
+        response.status = http_status_for_inference_response(inference_response);
         response.set_content(response_to_json(inference_response).dump(2), "application/json");
     });
 

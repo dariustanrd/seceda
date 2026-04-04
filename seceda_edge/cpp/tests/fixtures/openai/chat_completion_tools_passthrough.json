@@ -1,0 +1,18 @@
+{
+  "model": "seceda/default",
+  "messages": [
+    { "role": "user", "content": "Call a tool" }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "demo_fn",
+        "description": "demo",
+        "parameters": { "type": "object", "properties": {} }
+      }
+    }
+  ],
+  "tool_choice": "auto",
+  "response_format": { "type": "json_object" }
+}

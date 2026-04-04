@@ -135,6 +135,18 @@ bool RuntimeConfigParser::parse(
                 return false;
             }
             config.local.model_path = value;
+        } else if (arg.rfind("--local-engine-id", 0) == 0) {
+            if (!next_value(argc, argv, i, arg, value, error)) {
+                return false;
+            }
+            config.local.engine_id = value;
+        } else if (arg.rfind("--local-execution-mode", 0) == 0) {
+            if (!next_value(argc, argv, i, arg, value, error)) {
+                return false;
+            }
+            const std::string trimmed = trim(value);
+            config.local.execution_mode =
+                trimmed.empty() ? std::string{"in_process"} : trimmed;
         } else if (arg.rfind("--system-prompt", 0) == 0) {
             if (!next_value(argc, argv, i, arg, value, error)) {
                 return false;
@@ -349,6 +361,8 @@ std::string RuntimeConfigParser::help_text(const char * program_name) {
         << "  --host HOST\n"
         << "  --port PORT\n"
         << "  --model-path PATH\n"
+        << "  --local-engine-id ID\n"
+        << "  --local-execution-mode in_process|sdk_bridge|sidecar_server\n"
         << "  --system-prompt TEXT\n"
         << "  --warmup-prompt TEXT\n"
         << "  --public-model-alias NAME\n\n"
