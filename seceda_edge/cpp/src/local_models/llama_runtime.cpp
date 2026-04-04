@@ -202,6 +202,56 @@ bool apply_stop_sequences(std::string & text, const std::vector<std::string> & s
     return true;
 }
 
+std::size_t first_stop_sequence_match(
+    const std::string & text,
+    const std::vector<std::string> & stop_sequences) {
+    std::size_t first_match = std::string::npos;
+    for (const auto & stop_sequence : stop_sequences) {
+        if (stop_sequence.empty()) {
+            continue;
+        }
+
+        const std::size_t match = text.find(stop_sequence);
+        if (match != std::string::npos && (first_match == std::string::npos || match < first_match)) {
+            first_match = match;
+        }
+    }
+
+    return first_match;
+}
+
+std::size_t max_stop_sequence_holdback(const std::vector<std::string> & stop_sequences) {
+    std::size_t holdback = 0;
+    for (const auto & stop_sequence : stop_sequences) {
+        if (stop_sequence.size() > holdback) {
+            holdback = stop_sequence.size();
+        }
+    }
+
+    return holdback == 0 ? 0 : holdback - 1;
+}
+
+bool emit_stream_safe_prefix(
+    const std::string & text,
+    std::size_t safe_end,
+    std::size_t & streamed_size,
+    const StreamDeltaCallback & on_delta,
+    std::string & error) {
+    if (safe_end <= streamed_size) {
+        return true;
+    }
+
+    StreamedChatDelta delta;
+    delta.content = text.substr(streamed_size, safe_end - streamed_size);
+    if (!delta.content.empty() && !on_delta(delta)) {
+        error = "Streaming cancelled by client";
+        return false;
+    }
+
+    streamed_size = safe_end;
+    return true;
+}
+
 }  // namespace
 
 struct LlamaRuntime::Bundle {
@@ -323,6 +373,23 @@ LocalCompletionResult LlamaRuntime::generate(const InferenceRequest & request) {
     return result;
 }
 
+LocalCompletionResult LlamaRuntime::generate_stream(
+    const InferenceRequest & request,
+    const StreamDeltaCallback & on_delta) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (bundle_ == nullptr) {
+        LocalCompletionResult result;
+        result.error = "Local llama runtime is not loaded";
+        return result;
+    }
+
+    auto result = generate_with_bundle(*bundle_, request, false, &on_delta);
+    if (!result.ok) {
+        last_error_ = result.error;
+    }
+    return result;
+}
+
 bool LlamaRuntime::backend_ready() {
     static std::once_flag init_once;
     static bool initialized = false;
@@ -414,7 +481,8 @@ std::unique_ptr<LlamaRuntime::Bundle> LlamaRuntime::load_bundle(
 LocalCompletionResult LlamaRuntime::generate_with_bundle(
     Bundle & bundle,
     const InferenceRequest & request,
-    bool warmup_mode) {
+    bool warmup_mode,
+    const StreamDeltaCallback * on_delta) {
     LocalCompletionResult result;
     result.active_model_path = bundle.info.model_path;
     result.identity.route_target = RouteTarget::kLocal;
@@ -509,6 +577,11 @@ LocalCompletionResult LlamaRuntime::generate_with_bundle(
 
     result.timing.prompt_tokens = prompt_token_count;
     bool stopped_normally = false;
+    bool stopped_on_sequence = false;
+    std::string generated_text;
+    std::size_t streamed_size = 0;
+    const bool stream_enabled = !warmup_mode && on_delta != nullptr;
+    const std::size_t stop_holdback = max_stop_sequence_holdback(request.advanced.stop_sequences);
 
     for (int generated = 0; generated < request.options.max_completion_tokens; ++generated) {
         const llama_token next_token = llama_sampler_sample(sampler.get(), bundle.context, -1);
@@ -533,7 +606,38 @@ LocalCompletionResult LlamaRuntime::generate_with_bundle(
         }
 
         if (!warmup_mode) {
-            result.text += piece;
+            generated_text += piece;
+            if (stream_enabled) {
+                const std::size_t stop_match =
+                    first_stop_sequence_match(generated_text, request.advanced.stop_sequences);
+                if (stop_match != std::string::npos) {
+                    if (!emit_stream_safe_prefix(
+                            generated_text,
+                            stop_match,
+                            streamed_size,
+                            *on_delta,
+                            result.error)) {
+                        llama_set_warmup(bundle.context, false);
+                        return result;
+                    }
+                    generated_text.erase(stop_match);
+                    stopped_on_sequence = true;
+                    result.timing.generated_tokens += 1;
+                    break;
+                }
+
+                const std::size_t safe_emit_end =
+                    generated_text.size() > stop_holdback ? generated_text.size() - stop_holdback : 0;
+                if (!emit_stream_safe_prefix(
+                        generated_text,
+                        safe_emit_end,
+                        streamed_size,
+                        *on_delta,
+                        result.error)) {
+                    llama_set_warmup(bundle.context, false);
+                    return result;
+                }
+            }
         }
         result.timing.generated_tokens += 1;
 
@@ -550,8 +654,25 @@ LocalCompletionResult LlamaRuntime::generate_with_bundle(
         }
     }
 
-    const bool stopped_on_sequence = !warmup_mode &&
-        apply_stop_sequences(result.text, request.advanced.stop_sequences);
+    if (!warmup_mode && stream_enabled && !stopped_on_sequence) {
+        if (!emit_stream_safe_prefix(
+                generated_text,
+                generated_text.size(),
+                streamed_size,
+                *on_delta,
+                result.error)) {
+            llama_set_warmup(bundle.context, false);
+            return result;
+        }
+    }
+
+    if (!warmup_mode) {
+        result.text = generated_text;
+    }
+
+    if (!warmup_mode && !stream_enabled) {
+        stopped_on_sequence = apply_stop_sequences(result.text, request.advanced.stop_sequences);
+    }
 
     result.ok = true;
     result.message.role = "assistant";

@@ -6,8 +6,13 @@
 #include <nlohmann/json.hpp>
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
+
+namespace seceda::edge {
+class EdgeDaemon;
+}
 
 namespace seceda::edge::openai_compat {
 
@@ -44,6 +49,38 @@ std::string chat_completion_sse(
     const InferenceResponse & response,
     const std::string & completion_id,
     std::int64_t created_at);
+
+std::string chat_completion_sse_delta(
+    const InferenceRequest & request,
+    const std::string & completion_id,
+    std::int64_t created_at,
+    const json & delta);
+
+std::string chat_completion_sse_finish(
+    const InferenceRequest & request,
+    const std::string & completion_id,
+    std::int64_t created_at,
+    const std::string & finish_reason);
+
+std::string chat_completion_sse_usage(
+    const InferenceRequest & request,
+    const InferenceResponse & response,
+    const std::string & completion_id,
+    std::int64_t created_at);
+
+std::string chat_completion_sse_error(
+    const std::string & message,
+    const std::string & type,
+    const std::string & param = {},
+    const std::string & code = {});
+
+std::string chat_completion_sse_done();
+
+void set_streaming_chat_completion_response(
+    httplib::Response & response,
+    EdgeDaemon & daemon,
+    InferenceRequest request,
+    std::function<bool()> is_connection_closed = {});
 
 std::string make_chat_completion_id();
 

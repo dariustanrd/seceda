@@ -58,6 +58,25 @@ InferenceResponse EdgeDaemon::handle_inference(InferenceRequest request) {
     return response;
 }
 
+InferenceResponse EdgeDaemon::handle_inference_stream(
+    InferenceRequest request,
+    const StreamDeltaCallback & on_delta) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (request.model.empty()) {
+            request.model = config_.public_model_alias;
+        }
+        prepend_system_message(request, config_.default_system_prompt);
+    }
+
+    auto response = executor_.execute_streaming(request, on_delta);
+    if (!response.ok) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        last_error_ = response.error;
+    }
+    return response;
+}
+
 ModelReloadResult EdgeDaemon::reload_model(
     const std::string & model_path,
     const std::string & warmup_prompt) {

@@ -11,8 +11,15 @@ public:
     bool is_configured() const override;
     CloudClientInfo info() const override;
     CloudCompletionResult complete(const InferenceRequest & request) override;
+    CloudCompletionResult complete_stream(
+        const InferenceRequest & request,
+        const StreamDeltaCallback & on_delta) override;
 
 private:
+    CloudCompletionResult complete_impl(
+        const InferenceRequest & request,
+        const StreamDeltaCallback * on_delta);
+
     CloudConfig config_;
 };
 

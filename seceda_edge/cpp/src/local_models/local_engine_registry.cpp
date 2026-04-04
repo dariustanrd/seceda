@@ -119,4 +119,21 @@ LocalCompletionResult LocalEngineRegistry::generate(const InferenceRequest & req
     return delegate_->generate(request);
 }
 
+LocalCompletionResult LocalEngineRegistry::generate_stream(
+    const InferenceRequest & request,
+    const StreamDeltaCallback & on_delta) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (delegate_ == nullptr) {
+        LocalCompletionResult result;
+        result.error =
+            last_error_.empty() ? "Local engine is not initialized" : last_error_;
+        result.identity.route_target = RouteTarget::kLocal;
+        result.identity.engine_id = last_config_.engine_id;
+        result.identity.execution_mode = last_config_.execution_mode;
+        return result;
+    }
+
+    return delegate_->generate_stream(request, on_delta);
+}
+
 }  // namespace seceda::edge

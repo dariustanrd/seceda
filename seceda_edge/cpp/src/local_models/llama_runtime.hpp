@@ -26,6 +26,9 @@ public:
     bool is_ready() const override;
     LocalModelInfo info() const override;
     LocalCompletionResult generate(const InferenceRequest & request) override;
+    LocalCompletionResult generate_stream(
+        const InferenceRequest & request,
+        const StreamDeltaCallback & on_delta) override;
 
 private:
     struct Bundle;
@@ -37,7 +40,8 @@ private:
     static LocalCompletionResult generate_with_bundle(
         Bundle & bundle,
         const InferenceRequest & request,
-        bool warmup_mode);
+        bool warmup_mode,
+        const StreamDeltaCallback * on_delta = nullptr);
 
     mutable std::mutex mutex_;
     std::unique_ptr<Bundle> bundle_;

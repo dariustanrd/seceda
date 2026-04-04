@@ -1,7 +1,9 @@
 #include "openai_compat/openai_compat.hpp"
+#include "runtime/edge_daemon.hpp"
 
 #include <atomic>
 #include <chrono>
+#include <memory>
 
 namespace seceda::edge::openai_compat {
 
@@ -45,6 +47,94 @@ json usage_to_json(const TimingInfo & timing) {
 
 std::string sse_event(const json & payload) {
     return "data: " + payload.dump() + "\n\n";
+}
+
+json chat_completion_chunk_payload(
+    const InferenceRequest & request,
+    const std::string & completion_id,
+    std::int64_t created_at,
+    const json & delta,
+    const json & finish_reason) {
+    json choices = json::array();
+    choices.push_back(
+        {
+            {"index", 0},
+            {"delta", delta},
+            {"finish_reason", finish_reason},
+        });
+
+    return json{
+        {"id", completion_id},
+        {"object", "chat.completion.chunk"},
+        {"created", created_at},
+        {"model", request.model},
+        {"choices", std::move(choices)},
+    };
+}
+
+json tool_calls_delta_json(const AssistantMessage & message) {
+    json tool_calls = json::array();
+    for (const auto & tool_call : message.tool_calls) {
+        tool_calls.push_back(tool_call_to_json(tool_call));
+    }
+    return tool_calls;
+}
+
+struct StreamingResponseState {
+    EdgeDaemon * daemon = nullptr;
+    InferenceRequest request;
+    std::string completion_id;
+    std::int64_t created_at = 0;
+    std::function<bool()> is_connection_closed;
+    bool started = false;
+    bool emitted_role = false;
+    bool client_cancelled = false;
+    std::string stream_error;
+};
+
+bool stream_sink_open(const StreamingResponseState & state, httplib::DataSink & sink) {
+    if (state.is_connection_closed && state.is_connection_closed()) {
+        return false;
+    }
+    if (sink.is_writable && !sink.is_writable()) {
+        return false;
+    }
+    return true;
+}
+
+bool write_stream_payload(
+    StreamingResponseState & state,
+    httplib::DataSink & sink,
+    const std::string & payload) {
+    if (!stream_sink_open(state, sink)) {
+        state.client_cancelled = true;
+        return false;
+    }
+    if (!sink.write(payload.data(), payload.size())) {
+        state.client_cancelled = true;
+        return false;
+    }
+    return true;
+}
+
+bool write_role_chunk_if_needed(StreamingResponseState & state, httplib::DataSink & sink) {
+    if (state.emitted_role) {
+        return true;
+    }
+
+    if (!write_stream_payload(
+            state,
+            sink,
+            chat_completion_sse_delta(
+                state.request,
+                state.completion_id,
+                state.created_at,
+                json{{"role", "assistant"}}))) {
+        return false;
+    }
+
+    state.emitted_role = true;
+    return true;
 }
 
 }  // namespace
@@ -98,58 +188,251 @@ std::string chat_completion_sse(
     const InferenceResponse & response,
     const std::string & completion_id,
     std::int64_t created_at) {
-    const auto chunk_base = [&](const json & delta, const json & finish_reason) {
-        json choices = json::array();
-        choices.push_back(
-            {
-                {"index", 0},
-                {"delta", delta},
-                {"finish_reason", finish_reason},
-            });
+    std::string stream;
+    stream += chat_completion_sse_delta(request, completion_id, created_at, json{{"role", "assistant"}});
 
-        return json{
+    if (!response.message.content.empty()) {
+        stream += chat_completion_sse_delta(
+            request,
+            completion_id,
+            created_at,
+            json{{"content", response.message.content}});
+    }
+
+    if (!response.message.tool_calls.empty()) {
+        stream += chat_completion_sse_delta(
+            request,
+            completion_id,
+            created_at,
+            json{{"tool_calls", tool_calls_delta_json(response.message)}});
+    }
+
+    stream += chat_completion_sse_finish(
+        request,
+        completion_id,
+        created_at,
+        response.finish_reason.empty() ? "stop" : response.finish_reason);
+
+    if (request.options.include_usage_in_stream) {
+        stream += chat_completion_sse_usage(request, response, completion_id, created_at);
+    }
+
+    stream += chat_completion_sse_done();
+    return stream;
+}
+
+std::string chat_completion_sse_delta(
+    const InferenceRequest & request,
+    const std::string & completion_id,
+    std::int64_t created_at,
+    const json & delta) {
+    return sse_event(chat_completion_chunk_payload(request, completion_id, created_at, delta, nullptr));
+}
+
+std::string chat_completion_sse_finish(
+    const InferenceRequest & request,
+    const std::string & completion_id,
+    std::int64_t created_at,
+    const std::string & finish_reason) {
+    return sse_event(
+        chat_completion_chunk_payload(
+            request,
+            completion_id,
+            created_at,
+            json::object(),
+            finish_reason.empty() ? json("stop") : json(finish_reason)));
+}
+
+std::string chat_completion_sse_usage(
+    const InferenceRequest & request,
+    const InferenceResponse & response,
+    const std::string & completion_id,
+    std::int64_t created_at) {
+    return sse_event(
+        json{
             {"id", completion_id},
             {"object", "chat.completion.chunk"},
             {"created", created_at},
             {"model", request.model},
-            {"choices", std::move(choices)},
-        };
-    };
+            {"choices", json::array()},
+            {"usage", usage_to_json(usage_timing_for_response(response))},
+        });
+}
 
-    std::string stream;
-    stream += sse_event(chunk_base(json{{"role", "assistant"}}, nullptr));
+std::string chat_completion_sse_error(
+    const std::string & message,
+    const std::string & type,
+    const std::string & param,
+    const std::string & code) {
+    return sse_event(openai_error_payload(message, type, param, code));
+}
 
-    if (!response.message.content.empty()) {
-        stream += sse_event(chunk_base(json{{"content", response.message.content}}, nullptr));
-    }
+std::string chat_completion_sse_done() {
+    return "data: [DONE]\n\n";
+}
 
-    if (!response.message.tool_calls.empty()) {
-        json tool_calls = json::array();
-        for (const auto & tool_call : response.message.tool_calls) {
-            tool_calls.push_back(tool_call_to_json(tool_call));
-        }
-        stream += sse_event(chunk_base(json{{"tool_calls", std::move(tool_calls)}}, nullptr));
-    }
+void set_streaming_chat_completion_response(
+    httplib::Response & response,
+    EdgeDaemon & daemon,
+    InferenceRequest request,
+    std::function<bool()> is_connection_closed) {
+    response.status = 200;
+    response.set_header("Cache-Control", "no-cache");
 
-    stream += sse_event(
-        chunk_base(
-            json::object(),
-            response.finish_reason.empty() ? json("stop") : json(response.finish_reason)));
+    auto state = std::make_shared<StreamingResponseState>();
+    state->daemon = &daemon;
+    state->request = std::move(request);
+    state->completion_id = make_chat_completion_id();
+    state->created_at = unix_timestamp_now();
+    state->is_connection_closed =
+        is_connection_closed ? std::move(is_connection_closed) : []() { return false; };
 
-    if (request.options.include_usage_in_stream) {
-        stream += sse_event(
-            json{
-                {"id", completion_id},
-                {"object", "chat.completion.chunk"},
-                {"created", created_at},
-                {"model", request.model},
-                {"choices", json::array()},
-                {"usage", usage_to_json(usage_timing_for_response(response))},
-            });
-    }
+    response.set_chunked_content_provider(
+        "text/event-stream",
+        [state](size_t offset, httplib::DataSink & sink) {
+            if (state->started || offset > 0) {
+                sink.done();
+                return true;
+            }
+            state->started = true;
 
-    stream += "data: [DONE]\n\n";
-    return stream;
+            const auto stream_response = state->daemon->handle_inference_stream(
+                state->request,
+                [&](const StreamedChatDelta & delta) {
+                    if (!delta.content.empty() || !delta.tool_calls_json.empty()) {
+                        if (!write_role_chunk_if_needed(*state, sink)) {
+                            return false;
+                        }
+                    }
+
+                    if (!delta.content.empty() &&
+                        !write_stream_payload(
+                            *state,
+                            sink,
+                            chat_completion_sse_delta(
+                                state->request,
+                                state->completion_id,
+                                state->created_at,
+                                json{{"content", delta.content}}))) {
+                        return false;
+                    }
+
+                    if (!delta.tool_calls_json.empty()) {
+                        try {
+                            if (!write_stream_payload(
+                                    *state,
+                                    sink,
+                                    chat_completion_sse_delta(
+                                        state->request,
+                                        state->completion_id,
+                                        state->created_at,
+                                        json{{"tool_calls", json::parse(delta.tool_calls_json)}}))) {
+                                return false;
+                            }
+                        } catch (const std::exception & exception) {
+                            state->stream_error =
+                                std::string("Failed to serialize streamed tool call delta: ") +
+                                exception.what();
+                            return false;
+                        }
+                    }
+
+                    return true;
+                });
+
+            if (state->client_cancelled) {
+                return false;
+            }
+
+            if (!state->stream_error.empty()) {
+                if (!write_stream_payload(
+                        *state,
+                        sink,
+                        chat_completion_sse_error(state->stream_error, "server_error")) ||
+                    !write_stream_payload(*state, sink, chat_completion_sse_done())) {
+                    return false;
+                }
+                sink.done();
+                return true;
+            }
+
+            if (!stream_response.ok) {
+                if (!write_stream_payload(
+                        *state,
+                        sink,
+                        chat_completion_sse_error(
+                            stream_response.error.empty() ? "Inference request failed"
+                                                          : stream_response.error,
+                            openai_error_type(stream_response))) ||
+                    !write_stream_payload(*state, sink, chat_completion_sse_done())) {
+                    return false;
+                }
+                sink.done();
+                return true;
+            }
+
+            if (!state->emitted_role) {
+                if (!write_role_chunk_if_needed(*state, sink)) {
+                    return false;
+                }
+
+                if (!stream_response.message.content.empty() &&
+                    !write_stream_payload(
+                        *state,
+                        sink,
+                        chat_completion_sse_delta(
+                            state->request,
+                            state->completion_id,
+                            state->created_at,
+                            json{{"content", stream_response.message.content}}))) {
+                    return false;
+                }
+
+                if (!stream_response.message.tool_calls.empty() &&
+                    !write_stream_payload(
+                        *state,
+                        sink,
+                        chat_completion_sse_delta(
+                            state->request,
+                            state->completion_id,
+                            state->created_at,
+                            json{{"tool_calls", tool_calls_delta_json(stream_response.message)}}))) {
+                    return false;
+                }
+            }
+
+            if (!write_stream_payload(
+                    *state,
+                    sink,
+                    chat_completion_sse_finish(
+                        state->request,
+                        state->completion_id,
+                        state->created_at,
+                        stream_response.finish_reason.empty() ? "stop"
+                                                             : stream_response.finish_reason))) {
+                return false;
+            }
+
+            if (state->request.options.include_usage_in_stream &&
+                !write_stream_payload(
+                    *state,
+                    sink,
+                    chat_completion_sse_usage(
+                        state->request,
+                        stream_response,
+                        state->completion_id,
+                        state->created_at))) {
+                return false;
+            }
+
+            if (!write_stream_payload(*state, sink, chat_completion_sse_done())) {
+                return false;
+            }
+
+            sink.done();
+            return true;
+        },
+        [state](bool) {});
 }
 
 std::int64_t unix_timestamp_now() {

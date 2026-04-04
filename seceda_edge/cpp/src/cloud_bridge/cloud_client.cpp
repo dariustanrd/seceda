@@ -21,12 +21,14 @@ using json = nlohmann::json;
 
 struct CurlStreamState {
     CloudCompletionResult * result = nullptr;
+    const StreamDeltaCallback * on_delta = nullptr;
     std::string raw_body;
     std::string event_buffer;
     std::string stream_error;
     std::string parser_error;
     bool saw_stream_event = false;
     bool saw_done = false;
+    bool stream_cancelled = false;
     std::chrono::steady_clock::time_point request_start;
 };
 
@@ -293,6 +295,55 @@ bool apply_stream_delta(
     return true;
 }
 
+bool emit_stream_delta_payload(
+    const json & delta,
+    const StreamDeltaCallback & on_delta,
+    std::string & error) {
+    if (!delta.is_object()) {
+        error = "Cloud delta payload must be an object";
+        return false;
+    }
+
+    StreamedChatDelta emitted_delta;
+    if (delta.contains("content")) {
+        if (delta["content"].is_string()) {
+            emitted_delta.content = delta["content"].get<std::string>();
+        } else if (!delta["content"].is_null()) {
+            error = "Cloud delta content must be a string or null";
+            return false;
+        }
+    }
+
+    if (delta.contains("tool_calls")) {
+        if (delta["tool_calls"].is_null()) {
+            if (emitted_delta.content.empty()) {
+                return true;
+            }
+            if (!on_delta(emitted_delta)) {
+                error = "Streaming cancelled by client";
+                return false;
+            }
+            return true;
+        }
+        if (!delta["tool_calls"].is_array() && !delta["tool_calls"].is_object()) {
+            error = "Cloud delta tool_calls must be an array or object";
+            return false;
+        }
+        emitted_delta.tool_calls_json = delta["tool_calls"].dump();
+    }
+
+    if (emitted_delta.content.empty() && emitted_delta.tool_calls_json.empty()) {
+        return true;
+    }
+
+    if (!on_delta(emitted_delta)) {
+        error = "Streaming cancelled by client";
+        return false;
+    }
+
+    return true;
+}
+
 bool apply_full_message(
     const json & message,
     CloudCompletionResult & result,
@@ -492,6 +543,20 @@ size_t curl_write_callback(char * data, size_t size, size_t count, void * user_d
         try {
             const json parsed_payload = json::parse(payload);
             bool finished = false;
+            if (state.on_delta != nullptr &&
+                parsed_payload.contains("choices") &&
+                parsed_payload["choices"].is_array() &&
+                !parsed_payload["choices"].empty() &&
+                parsed_payload["choices"][0].is_object() &&
+                parsed_payload["choices"][0].contains("delta")) {
+                if (!emit_stream_delta_payload(
+                        parsed_payload["choices"][0]["delta"],
+                        *state.on_delta,
+                        state.parser_error)) {
+                    state.stream_cancelled = state.parser_error == "Streaming cancelled by client";
+                    return 0;
+                }
+            }
             if (!apply_completion_payload(
                     parsed_payload,
                     *state.result,
@@ -552,6 +617,18 @@ CloudClientInfo CloudClient::info() const {
 }
 
 CloudCompletionResult CloudClient::complete(const InferenceRequest & request) {
+    return complete_impl(request, nullptr);
+}
+
+CloudCompletionResult CloudClient::complete_stream(
+    const InferenceRequest & request,
+    const StreamDeltaCallback & on_delta) {
+    return complete_impl(request, &on_delta);
+}
+
+CloudCompletionResult CloudClient::complete_impl(
+    const InferenceRequest & request,
+    const StreamDeltaCallback * on_delta) {
     CloudCompletionResult result;
     if (!is_configured()) {
         result.error = "Cloud fallback is not configured";
@@ -572,7 +649,7 @@ CloudCompletionResult CloudClient::complete(const InferenceRequest & request) {
     result.identity.execution_mode = config_.execution_mode;
     result.identity.capabilities = config_.capabilities;
 
-    const bool upstream_stream = !wants_rich_openai_response(request);
+    const bool upstream_stream = request.options.stream || !wants_rich_openai_response(request);
     json body = {
         {"model", config_.model},
         {"messages", json::array()},
@@ -645,15 +722,25 @@ CloudCompletionResult CloudClient::complete(const InferenceRequest & request) {
 
         CurlStreamState stream_state;
         stream_state.result = &result;
+        stream_state.on_delta = on_delta;
         stream_state.raw_body.clear();
         stream_state.event_buffer.clear();
         stream_state.stream_error.clear();
         stream_state.parser_error.clear();
         stream_state.saw_stream_event = false;
         stream_state.saw_done = false;
+        stream_state.stream_cancelled = false;
         stream_state.request_start = request_start;
 
         result = CloudCompletionResult{};
+        result.message.role = "assistant";
+        result.identity.route_target = RouteTarget::kCloud;
+        result.identity.backend_id = config_.backend_id;
+        result.identity.model_id = config_.model;
+        result.identity.model_alias = config_.model_alias;
+        result.identity.display_name = config_.display_name;
+        result.identity.execution_mode = config_.execution_mode;
+        result.identity.capabilities = config_.capabilities;
 
         CURL * curl = curl_easy_init();
         if (curl == nullptr) {
@@ -711,6 +798,11 @@ CloudCompletionResult CloudClient::complete(const InferenceRequest & request) {
 
         if (!stream_state.parser_error.empty()) {
             result.error = stream_state.parser_error;
+            return result;
+        }
+
+        if (stream_state.stream_cancelled) {
+            result.error = "Streaming cancelled by client";
             return result;
         }
 

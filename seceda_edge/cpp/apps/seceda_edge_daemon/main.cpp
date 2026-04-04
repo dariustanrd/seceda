@@ -8,7 +8,6 @@
 #include <cpp-httplib/httplib.h>
 #include <nlohmann/json.hpp>
 
-#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -396,6 +395,15 @@ int main(int argc, char ** argv) {
             return;
         }
 
+        if (inference_request.options.stream) {
+            oa::set_streaming_chat_completion_response(
+                response,
+                daemon,
+                std::move(inference_request),
+                request.is_connection_closed);
+            return;
+        }
+
         const auto inference_response = daemon.handle_inference(inference_request);
         if (!inference_response.ok) {
             oa::set_openai_error(
@@ -408,18 +416,6 @@ int main(int argc, char ** argv) {
 
         const std::string completion_id = oa::make_chat_completion_id();
         const std::int64_t created_at = oa::unix_timestamp_now();
-        if (inference_request.options.stream) {
-            response.status = 200;
-            response.set_header("Cache-Control", "no-cache");
-            response.set_content(
-                oa::chat_completion_sse(
-                    inference_request,
-                    inference_response,
-                    completion_id,
-                    created_at),
-                "text/event-stream");
-            return;
-        }
 
         response.set_content(
             oa::chat_completion_response(

@@ -29,6 +29,9 @@ public:
     bool is_ready() const override;
     LocalModelInfo info() const override;
     LocalCompletionResult generate(const InferenceRequest & request) override;
+    LocalCompletionResult generate_stream(
+        const InferenceRequest & request,
+        const StreamDeltaCallback & on_delta) override;
 
 private:
     ILocalModelRuntime * resolve_delegate(const LocalModelConfig & config, std::string & error);

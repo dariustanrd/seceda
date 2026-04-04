@@ -64,6 +64,20 @@ if(BUILD_TESTING)
             seceda_edge_httplib
     )
     add_test(NAME seceda_edge_openai_http_integration_test COMMAND seceda_edge_openai_http_integration_test)
+
+    seceda_add_edge_executable(
+        seceda_edge_openai_streaming_integration_test
+        SOURCES
+            openai_streaming_integration_test.cpp
+        EXTRA_LIBS
+            seceda_edge_cloud_bridge
+            seceda_edge_openai_compat
+            seceda_edge_httplib
+    )
+    add_test(
+        NAME seceda_edge_openai_streaming_integration_test
+        COMMAND seceda_edge_openai_streaming_integration_test
+    )
 endif()
 
 if(SECEDA_BUILD_LLAMA_CPP)

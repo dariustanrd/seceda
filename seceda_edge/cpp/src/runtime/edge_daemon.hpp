@@ -18,6 +18,9 @@ public:
 
     bool initialize();
     InferenceResponse handle_inference(InferenceRequest request);
+    InferenceResponse handle_inference_stream(
+        InferenceRequest request,
+        const StreamDeltaCallback & on_delta);
     ModelReloadResult reload_model(const std::string & model_path, const std::string & warmup_prompt);
 
     HealthSnapshot health() const;
