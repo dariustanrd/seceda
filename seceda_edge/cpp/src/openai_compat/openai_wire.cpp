@@ -160,6 +160,13 @@ json assistant_message_json(const AssistantMessage & message) {
     return payload;
 }
 
+std::string ensure_chat_completion_id(InferenceRequest & request) {
+    if (request.seceda.request_id.empty()) {
+        request.seceda.request_id = make_chat_completion_id();
+    }
+    return request.seceda.request_id;
+}
+
 json chat_completion_response(
     const InferenceRequest & request,
     const InferenceResponse & response,
@@ -282,7 +289,7 @@ void set_streaming_chat_completion_response(
     auto state = std::make_shared<StreamingResponseState>();
     state->daemon = &daemon;
     state->request = std::move(request);
-    state->completion_id = make_chat_completion_id();
+    state->completion_id = ensure_chat_completion_id(state->request);
     state->created_at = unix_timestamp_now();
     state->is_connection_closed =
         is_connection_closed ? std::move(is_connection_closed) : []() { return false; };

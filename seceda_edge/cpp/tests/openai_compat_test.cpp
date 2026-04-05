@@ -299,7 +299,7 @@ bool test_openai_error_mapping() {
     return true;
 }
 
-bool test_read_completion_token_limit_shared_with_inference_options() {
+bool test_read_completion_token_limit_accepts_completion_aliases() {
     json options = {
         {"max_completion_tokens", 99},
     };
@@ -314,6 +314,23 @@ bool test_read_completion_token_limit_shared_with_inference_options() {
     return true;
 }
 
+bool test_ensure_chat_completion_id_reuses_existing_value() {
+    InferenceRequest request;
+    const std::string generated = oa::ensure_chat_completion_id(request);
+    if (!require(!generated.empty(), "generated request id should not be empty")) {
+        return false;
+    }
+    if (!require(request.seceda.request_id == generated, "generated request id should be stored")) {
+        return false;
+    }
+    if (!require(
+            oa::ensure_chat_completion_id(request) == generated,
+            "existing request id should be reused")) {
+        return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -322,7 +339,8 @@ int main() {
         !test_model_alias_sets_explicit_remote_selection() || !test_models_list_payload() ||
         !test_named_remote_backend_alias_uses_catalog_metadata() ||
         !test_openai_error_mapping() ||
-        !test_read_completion_token_limit_shared_with_inference_options()) {
+        !test_read_completion_token_limit_accepts_completion_aliases() ||
+        !test_ensure_chat_completion_id_reuses_existing_value()) {
         return 1;
     }
     std::cout << "openai_compat_test: ok\n";

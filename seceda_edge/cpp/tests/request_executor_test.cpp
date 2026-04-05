@@ -83,11 +83,17 @@ int main() {
     local.result_.text = "local answer";
 
     InferenceRequest request;
+    request.seceda.request_id = "chatcmpl-seceda-request-executor";
     request.messages.push_back({"user", "hello", {}, {}, {}});
     refresh_request_views(request);
 
     auto local_response = executor.execute(request);
     if (!require(local_response.ok, "local request should succeed")) {
+        return 1;
+    }
+    if (!require(
+            local_response.request_id == "chatcmpl-seceda-request-executor",
+            "request id should be preserved on local responses")) {
         return 1;
     }
     if (!require(local_response.final_target == RouteTarget::kLocal, "local path should stay local")) {
@@ -109,6 +115,11 @@ int main() {
         return 1;
     }
     if (!require(fallback_response.fallback_used, "fallback flag should be set")) {
+        return 1;
+    }
+    if (!require(
+            fallback_response.request_id == "chatcmpl-seceda-request-executor",
+            "request id should be preserved across fallback")) {
         return 1;
     }
 

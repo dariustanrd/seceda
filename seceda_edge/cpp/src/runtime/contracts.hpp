@@ -177,7 +177,7 @@ struct SecedaRequestContext {
     std::string preferred_engine_id;
     std::string preferred_backend_id;
     std::string preferred_model_alias;
-    std::string trace_id;
+    std::string request_id;
 };
 
 struct InferenceRequest {
@@ -286,6 +286,7 @@ struct RouteDecision {
 struct InferenceResponse {
     bool ok = false;
     InferenceErrorKind error_kind = InferenceErrorKind::kNone;
+    std::string request_id;
     std::string text;
     AssistantMessage message;
     std::string finish_reason = "stop";
@@ -487,14 +488,19 @@ struct InfoSnapshot {
 
 struct InferenceEvent {
     std::uint64_t id = 0;
+    std::string request_id;
     std::string timestamp_utc;
+    RouteTarget requested_target = RouteTarget::kAuto;
     RouteTarget initial_target = RouteTarget::kLocal;
     RouteTarget final_target = RouteTarget::kLocal;
     bool ok = false;
     bool fallback_used = false;
     InferenceErrorKind error_kind = InferenceErrorKind::kNone;
+    std::string error;
+    std::string finish_reason = "stop";
     std::string route_reason;
     std::string fallback_reason;
+    std::vector<std::string> matched_rules;
     std::string initial_engine_id;
     std::string initial_backend_id;
     std::string initial_model_id;
@@ -506,9 +512,10 @@ struct InferenceEvent {
     std::string model_alias;
     std::string display_name;
     std::string execution_mode;
-    double total_latency_ms = 0.0;
-    double local_latency_ms = 0.0;
-    double cloud_latency_ms = 0.0;
+    std::string active_model_path;
+    TimingInfo timing;
+    std::optional<TimingInfo> local_timing;
+    std::optional<TimingInfo> cloud_timing;
 };
 
 struct EventBatch {

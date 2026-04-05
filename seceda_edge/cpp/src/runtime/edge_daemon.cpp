@@ -168,8 +168,8 @@ std::string EdgeDaemon::metrics_text() const {
     return metrics_.render_prometheus();
 }
 
-EventBatch EdgeDaemon::events(std::uint64_t since_id, std::size_t limit) const {
-    return metrics_.get_events(since_id, limit);
+EventBatch EdgeDaemon::events(std::uint64_t since_id, std::size_t limit, std::string request_id) const {
+    return metrics_.get_events(since_id, limit, std::move(request_id));
 }
 
 void EdgeDaemon::update_state_locked(bool local_ready) {

@@ -20,7 +20,7 @@ public:
     void request_finished(const InferenceResponse & response);
 
     std::string render_prometheus() const;
-    EventBatch get_events(std::uint64_t since_id, std::size_t limit) const;
+    EventBatch get_events(std::uint64_t since_id, std::size_t limit, std::string request_id = {}) const;
 
 private:
     std::string now_utc() const;

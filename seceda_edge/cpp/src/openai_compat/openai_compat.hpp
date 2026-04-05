@@ -30,11 +30,14 @@ bool parse_chat_completion_request(
     InferenceRequest & request,
     std::string & error);
 
-/// Shared by OpenAI chat requests and the deprecated Seceda `/inference` bridge `options` object.
+/// Shared by OpenAI chat requests and transport helpers that accept either
+/// `max_tokens` or `max_completion_tokens`.
 bool read_completion_token_limit(
     const json & payload,
     int & out,
     std::string & error);
+
+std::string ensure_chat_completion_id(InferenceRequest & request);
 
 json assistant_message_json(const AssistantMessage & message);
 

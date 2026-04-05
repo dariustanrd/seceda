@@ -6,7 +6,7 @@ Seceda turns `seceda_edge_daemon` into a localhost OpenAI-compatible service tha
 
 Like the famous ridgeline of Seceda in the Dolomites, the system sits **between the edge and the cloud** — handling what it can locally, and elevating into the cloud when needed.
 
-`POST /inference` remains available only as a temporary bridge for older Seceda-native callers, and is deprecated.
+Seceda’s supported inference surface is now the OpenAI-compatible pair `GET /v1/models` and `POST /v1/chat/completions`. Use `GET /metrics/events?request_id=<openai_id>` when you need Seceda-specific routing and timing diagnostics for a completed request.
 
 ---
 
@@ -281,7 +281,7 @@ The current edge daemon exposes:
 
 - `GET /v1/models`
 - `POST /v1/chat/completions`
-- `POST /inference` as a deprecated bridge
+- `GET /metrics/events` for request-scoped observability
 
 The shared edge-to-cloud contract lives in `seceda_shared/README.md`.
 
@@ -337,6 +337,8 @@ curl http://127.0.0.1:8080/health
 curl http://127.0.0.1:8080/v1/models
 ```
 
+`seceda/default` keeps automatic routing. `local/default` forces the local path, and `remote/default` or any named remote alias exposed by your config forces the corresponding cloud backend.
+
 4. Send a chat completion through the OpenAI-compatible edge endpoint:
 
 ```bash
@@ -354,11 +356,17 @@ curl http://127.0.0.1:8080/v1/chat/completions \
   }'
 ```
 
-5. Confirm the response contains a non-empty `choices[0].message.content` string and a `usage` block.
+5. Confirm the response contains a non-empty `choices[0].message.content` string, a `usage` block, and an OpenAI response `id`.
 
 For streamed responses, add `"stream": true` and optionally `"stream_options": {"include_usage": true}` to the same request body.
 
-`POST /inference` is still available for older Seceda-native clients, but it should now be treated as deprecated and temporary.
+6. Use that response `id` to fetch Seceda-specific routing and timing details from the event log:
+
+```bash
+curl "http://127.0.0.1:8080/metrics/events?request_id=<chat_completion_id>"
+```
+
+That event payload includes the routing decision, matched rules, finish reason, active model path, and timing or token metadata without adding Seceda-specific fields to the OpenAI response body.
 
 For the first milestone, the edge daemon generates a fresh `Modal-Session-ID`
 per logical inference request and reuses it only across retries for that same

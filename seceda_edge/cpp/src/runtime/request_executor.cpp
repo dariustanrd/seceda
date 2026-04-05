@@ -85,6 +85,7 @@ InferenceResponse RequestExecutor::execute(const InferenceRequest & request) {
     const auto request_start = std::chrono::steady_clock::now();
 
     InferenceResponse response;
+    response.request_id = request.seceda.request_id;
     response.requested_target = request.seceda.route_override;
 
     if (request.messages.empty() || request.normalized.latest_user_message.empty()) {
@@ -145,6 +146,7 @@ InferenceResponse RequestExecutor::execute_streaming(
     const auto request_start = std::chrono::steady_clock::now();
 
     InferenceResponse response;
+    response.request_id = request.seceda.request_id;
     response.requested_target = request.seceda.route_override;
 
     if (request.messages.empty() || request.normalized.latest_user_message.empty()) {
@@ -249,6 +251,7 @@ InferenceResponse RequestExecutor::execute_local(
 
     const auto local_result = local_runtime_.generate(request);
     response.local_timing = local_result.timing;
+    response.total_timing = local_result.timing;
     response.active_model_path = local_result.active_model_path;
 
     if (local_result.ok) {
@@ -307,6 +310,7 @@ InferenceResponse RequestExecutor::execute_cloud(
 
     const auto cloud_result = cloud_client_.complete(request);
     response.cloud_timing = cloud_result.timing;
+    response.total_timing = cloud_result.timing;
 
     if (cloud_result.ok) {
         response.ok = true;
@@ -377,6 +381,7 @@ InferenceResponse RequestExecutor::execute_local_streaming(
 
     const auto local_result = local_runtime_.generate_stream(request, on_delta);
     response.local_timing = local_result.timing;
+    response.total_timing = local_result.timing;
     response.active_model_path = local_result.active_model_path;
 
     if (local_result.ok) {
@@ -440,6 +445,7 @@ InferenceResponse RequestExecutor::execute_cloud_streaming(
 
     const auto cloud_result = cloud_client_.complete_stream(request, on_delta);
     response.cloud_timing = cloud_result.timing;
+    response.total_timing = cloud_result.timing;
 
     if (cloud_result.ok) {
         response.ok = true;

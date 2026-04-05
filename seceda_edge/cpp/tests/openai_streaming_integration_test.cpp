@@ -324,10 +324,110 @@ json upstream_content_chunk(
     return payload;
 }
 
+json timing_to_json(const TimingInfo & timing) {
+    return {
+        {"total_latency_ms", timing.total_latency_ms},
+        {"has_ttft", timing.has_ttft},
+        {"ttft_ms", timing.ttft_ms},
+        {"prompt_tokens", timing.prompt_tokens},
+        {"generated_tokens", timing.generated_tokens},
+        {"total_tokens", total_token_count(timing)},
+    };
+}
+
+json event_to_json(const InferenceEvent & event) {
+    json payload = {
+        {"id", event.id},
+        {"request_id", event.request_id},
+        {"timestamp_utc", event.timestamp_utc},
+        {"requested_target", to_string(event.requested_target)},
+        {"initial_target", to_string(event.initial_target)},
+        {"final_target", to_string(event.final_target)},
+        {"ok", event.ok},
+        {"fallback_used", event.fallback_used},
+        {"error_kind", to_string(event.error_kind)},
+        {"error", event.error},
+        {"finish_reason", event.finish_reason},
+        {"route_reason", event.route_reason},
+        {"fallback_reason", event.fallback_reason},
+        {"matched_rules", event.matched_rules},
+        {"initial_engine_id", event.initial_engine_id},
+        {"initial_backend_id", event.initial_backend_id},
+        {"initial_model_id", event.initial_model_id},
+        {"initial_model_alias", event.initial_model_alias},
+        {"initial_execution_mode", event.initial_execution_mode},
+        {"engine_id", event.engine_id},
+        {"backend_id", event.backend_id},
+        {"model_id", event.model_id},
+        {"model_alias", event.model_alias},
+        {"display_name", event.display_name},
+        {"execution_mode", event.execution_mode},
+        {"active_model_path", event.active_model_path},
+        {"timing", timing_to_json(event.timing)},
+    };
+    if (event.local_timing.has_value()) {
+        payload["local_timing"] = timing_to_json(*event.local_timing);
+    }
+    if (event.cloud_timing.has_value()) {
+        payload["cloud_timing"] = timing_to_json(*event.cloud_timing);
+    }
+    return payload;
+}
+
+bool parse_query_uint64(
+    const httplib::Request & request,
+    const char * key,
+    std::uint64_t default_value,
+    std::uint64_t & out,
+    std::string & error) {
+    out = default_value;
+    if (!request.has_param(key)) {
+        return true;
+    }
+
+    try {
+        out = static_cast<std::uint64_t>(std::stoull(request.get_param_value(key)));
+        return true;
+    } catch (const std::exception &) {
+        error = std::string("Query parameter '") + key + "' must be an unsigned integer";
+        return false;
+    }
+}
+
 void install_openai_chat_route(
     TestServer & server,
     EdgeDaemon & daemon,
     const DaemonConfig & config) {
+    server.server().Get("/metrics/events", [&](const httplib::Request & request, httplib::Response & response) {
+        std::string error;
+        std::uint64_t since_id = 0;
+        std::uint64_t limit = 1000;
+        const std::string request_id =
+            request.has_param("request_id") ? request.get_param_value("request_id") : std::string{};
+        if (!parse_query_uint64(request, "since_id", 0, since_id, error) ||
+            !parse_query_uint64(request, "limit", 1000, limit, error)) {
+            response.status = 400;
+            response.set_content(json{{"ok", false}, {"error", error}}.dump(2), "application/json");
+            return;
+        }
+
+        const auto batch = daemon.events(since_id, static_cast<std::size_t>(limit), request_id);
+        json payload = {
+            {"since_id", batch.since_id},
+            {"latest_id", batch.latest_id},
+            {"returned", batch.events.size()},
+            {"events", json::array()},
+        };
+        if (!request_id.empty()) {
+            payload["request_id"] = request_id;
+        }
+        for (const auto & event : batch.events) {
+            payload["events"].push_back(event_to_json(event));
+        }
+
+        response.set_content(payload.dump(2), "application/json");
+    });
+
     server.server().Post(
         "/v1/chat/completions",
         [&](const httplib::Request & request, httplib::Response & response) {
@@ -338,6 +438,7 @@ void install_openai_chat_route(
                 return;
             }
 
+            const std::string completion_id = oa::ensure_chat_completion_id(inference_request);
             if (inference_request.options.stream) {
                 oa::set_streaming_chat_completion_response(
                     response,
@@ -362,7 +463,7 @@ void install_openai_chat_route(
                 oa::chat_completion_response(
                     inference_request,
                     inference_response,
-                    oa::make_chat_completion_id(),
+                    completion_id,
                     oa::unix_timestamp_now())
                     .dump(),
                 "application/json");
@@ -412,6 +513,20 @@ bool require_stream_starts_early(const StreamCapture & capture, const char * mes
     return require(first_ms + 60 < total_ms, message);
 }
 
+std::string extract_stream_request_id(const std::string & body) {
+    static constexpr const char kNeedle[] = "\"id\":\"";
+    const std::size_t start = body.find(kNeedle);
+    if (start == std::string::npos) {
+        return {};
+    }
+    const std::size_t value_start = start + sizeof(kNeedle) - 1;
+    const std::size_t value_end = body.find('"', value_start);
+    if (value_end == std::string::npos) {
+        return {};
+    }
+    return body.substr(value_start, value_end - value_start);
+}
+
 bool test_local_incremental_streaming() {
     auto local = std::make_shared<ScriptedLocalRuntime>();
     local->steps_ = {{0, "hel"}, {150, "lo"}};
@@ -457,6 +572,90 @@ bool test_local_incremental_streaming() {
         return false;
     }
     if (!require_contains(capture.body, "data: [DONE]", "local stream should terminate with DONE")) {
+        return false;
+    }
+
+    return true;
+}
+
+bool test_stream_completion_id_correlates_to_metrics_events() {
+    auto local = std::make_shared<ScriptedLocalRuntime>();
+    local->steps_ = {{0, "hel"}, {25, "lo"}};
+
+    auto cloud = std::make_shared<RecordingCloudClient>();
+    auto router = std::make_shared<StaticRouter>();
+    router->decision_.target = RouteTarget::kLocal;
+    router->decision_.reason = "local_default";
+    router->decision_.matched_rules = {"local_default"};
+
+    DaemonConfig config = minimal_config();
+    config.local.model_path = "local.gguf";
+
+    EdgeDaemon daemon(config, local, cloud, router);
+    if (!require(daemon.initialize(), "stream correlation daemon should initialize")) {
+        return false;
+    }
+
+    TestServer edge_server;
+    install_openai_chat_route(edge_server, daemon, config);
+    if (!require(edge_server.start(), "edge server should start")) {
+        return false;
+    }
+
+    StreamCapture capture;
+    if (!require(
+            post_stream_request(edge_server.base_url(), build_stream_request(), capture),
+            "stream correlation request should succeed")) {
+        return false;
+    }
+    if (!require(capture.status == 200, "stream correlation should return HTTP 200")) {
+        return false;
+    }
+
+    const std::string request_id = extract_stream_request_id(capture.body);
+    if (!require(!request_id.empty(), "stream chunks should expose a request id")) {
+        return false;
+    }
+
+    httplib::Client client(edge_server.base_url());
+    client.set_connection_timeout(2, 0);
+    client.set_read_timeout(5, 0);
+    const auto events = client.Get(("/metrics/events?request_id=" + request_id).c_str());
+    if (!require(events && events->status == 200, "stream metrics events should return HTTP 200")) {
+        return false;
+    }
+
+    json payload;
+    try {
+        payload = json::parse(events->body);
+    } catch (...) {
+        return require(false, "stream metrics events should return JSON");
+    }
+
+    if (!require(payload["returned"] == 1, "stream request id should match one event")) {
+        return false;
+    }
+    if (!require(payload["events"].is_array() && payload["events"].size() == 1, "one stream event")) {
+        return false;
+    }
+
+    const auto & event = payload["events"][0];
+    if (!require(event["request_id"] == request_id, "stream event request id should match")) {
+        return false;
+    }
+    if (!require(event["final_target"] == "local", "stream event should stay local")) {
+        return false;
+    }
+    if (!require(event["active_model_path"] == "local.gguf", "stream event should record active model path")) {
+        return false;
+    }
+    if (!require(event["timing"]["prompt_tokens"] == 1, "stream event should record prompt tokens")) {
+        return false;
+    }
+    if (!require(event["timing"]["generated_tokens"] == 2, "stream event should record generated tokens")) {
+        return false;
+    }
+    if (!require(event["local_timing"]["total_tokens"] == 3, "stream event should expose local timing totals")) {
         return false;
     }
 
@@ -769,6 +968,9 @@ bool test_stream_disconnect_cancels_local_generation() {
 
 int main() {
     if (!test_local_incremental_streaming()) {
+        return 1;
+    }
+    if (!test_stream_completion_id_correlates_to_metrics_events()) {
         return 1;
     }
     if (!test_cloud_incremental_streaming()) {

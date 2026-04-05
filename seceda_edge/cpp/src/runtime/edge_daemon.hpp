@@ -26,7 +26,7 @@ public:
     HealthSnapshot health() const;
     InfoSnapshot info() const;
     std::string metrics_text() const;
-    EventBatch events(std::uint64_t since_id, std::size_t limit) const;
+    EventBatch events(std::uint64_t since_id, std::size_t limit, std::string request_id = {}) const;
 
 private:
     void update_state_locked(bool local_ready);

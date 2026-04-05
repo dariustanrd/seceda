@@ -151,7 +151,7 @@ std::string MetricsRegistry::render_prometheus() const {
     return out.str();
 }
 
-EventBatch MetricsRegistry::get_events(std::uint64_t since_id, std::size_t limit) const {
+EventBatch MetricsRegistry::get_events(std::uint64_t since_id, std::size_t limit, std::string request_id) const {
     EventBatch batch;
     batch.since_id = since_id;
     limit = limit == 0 ? 1000 : limit;
@@ -163,6 +163,9 @@ EventBatch MetricsRegistry::get_events(std::uint64_t since_id, std::size_t limit
 
     for (const auto & event : events_) {
         if (event.id <= since_id) {
+            continue;
+        }
+        if (!request_id.empty() && event.request_id != request_id) {
             continue;
         }
         batch.events.push_back(event);
@@ -191,14 +194,19 @@ std::string MetricsRegistry::now_utc() const {
 void MetricsRegistry::push_event(const InferenceResponse & response) {
     InferenceEvent event;
     event.id = next_event_id_.fetch_add(1);
+    event.request_id = response.request_id;
     event.timestamp_utc = now_utc();
+    event.requested_target = response.requested_target;
     event.initial_target = response.initial_target;
     event.final_target = response.final_target;
     event.ok = response.ok;
     event.fallback_used = response.fallback_used;
     event.error_kind = response.error_kind;
+    event.error = response.error;
+    event.finish_reason = response.finish_reason;
     event.route_reason = response.route_reason;
     event.fallback_reason = response.fallback_reason;
+    event.matched_rules = response.matched_rules;
     event.initial_engine_id = response.initial_identity.engine_id;
     event.initial_backend_id = response.initial_identity.backend_id;
     event.initial_model_id = response.initial_identity.model_id;
@@ -210,12 +218,13 @@ void MetricsRegistry::push_event(const InferenceResponse & response) {
     event.model_alias = response.final_identity.model_alias;
     event.display_name = response.final_identity.display_name;
     event.execution_mode = response.final_identity.execution_mode;
-    event.total_latency_ms = response.total_timing.total_latency_ms;
+    event.active_model_path = response.active_model_path;
+    event.timing = response.total_timing;
     if (response.local_timing.has_value()) {
-        event.local_latency_ms = response.local_timing->total_latency_ms;
+        event.local_timing = response.local_timing;
     }
     if (response.cloud_timing.has_value()) {
-        event.cloud_latency_ms = response.cloud_timing->total_latency_ms;
+        event.cloud_timing = response.cloud_timing;
     }
 
     std::lock_guard<std::mutex> lock(events_mutex_);
