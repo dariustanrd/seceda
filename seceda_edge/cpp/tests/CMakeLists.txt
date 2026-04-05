@@ -47,6 +47,15 @@ if(BUILD_TESTING)
     add_test(NAME seceda_edge_cloud_client_test COMMAND seceda_edge_cloud_client_test)
 
     seceda_add_edge_executable(
+        seceda_edge_metrics_registry_test
+        SOURCES
+            metrics_registry_test.cpp
+        EXTRA_LIBS
+            seceda_edge_telemetry
+    )
+    add_test(NAME seceda_edge_metrics_registry_test COMMAND seceda_edge_metrics_registry_test)
+
+    seceda_add_edge_executable(
         seceda_edge_openai_compat_test
         SOURCES
             openai_compat_test.cpp
@@ -77,6 +86,19 @@ if(BUILD_TESTING)
     add_test(
         NAME seceda_edge_openai_streaming_integration_test
         COMMAND seceda_edge_openai_streaming_integration_test
+    )
+
+    seceda_add_edge_executable(
+        seceda_edge_sidecar_local_engine_adapter_test
+        SOURCES
+            sidecar_local_engine_adapter_test.cpp
+        EXTRA_LIBS
+            seceda_edge_local_models
+            seceda_edge_httplib
+    )
+    add_test(
+        NAME seceda_edge_sidecar_local_engine_adapter_test
+        COMMAND seceda_edge_sidecar_local_engine_adapter_test
     )
 endif()
 
