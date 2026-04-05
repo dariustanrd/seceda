@@ -5,5 +5,6 @@ seceda_add_edge_library(
         request_executor.cpp
         edge_daemon.cpp
     EXTRA_LIBS
+        seceda_edge_config_catalog
         seceda_edge_telemetry
 )

@@ -2,7 +2,6 @@
 
 #include <cstdint>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <vector>
 
@@ -320,6 +319,10 @@ struct LocalModelConfig {
     int n_gpu_layers = 99;
     int n_threads = -1;
     int n_threads_batch = -1;
+    std::string sidecar_base_url;
+    int sidecar_timeout_seconds = 120;
+    int sidecar_connect_timeout_seconds = 10;
+    bool sidecar_verify_tls = true;
 };
 
 struct RouterConfig {
@@ -386,6 +389,13 @@ struct ModelCatalogEntry {
     std::string id;
     std::string display_name;
     std::string owned_by = "seceda";
+    RouteTarget route_target = RouteTarget::kAuto;
+    std::string engine_id;
+    std::string backend_id;
+    std::string model_id;
+    std::string model_alias;
+    std::string execution_mode;
+    std::vector<std::string> capabilities;
 };
 
 struct DaemonConfig {
@@ -396,8 +406,10 @@ struct DaemonConfig {
     std::string public_model_alias = "seceda/default";
     GenerationOptions default_generation;
     LocalModelConfig local;
+    std::vector<LocalModelConfig> local_engines;
     RouterConfig router;
     CloudConfig cloud;
+    std::vector<CloudConfig> remote_backends;
     std::size_t event_log_capacity = 2048;
     std::vector<ModelCatalogEntry> exposed_models = {
         {"seceda/default", "Seceda default route", "seceda"},
@@ -414,6 +426,7 @@ struct LocalModelInfo {
     std::string execution_mode;
     std::vector<std::string> capabilities;
     std::string model_path;
+    std::string endpoint_base_url;
     std::string description;
     std::string last_error;
     int context_size = 0;
@@ -467,6 +480,8 @@ struct InfoSnapshot {
     RouterConfig router_config;
     LocalModelInfo local_model;
     CloudClientInfo cloud_client;
+    std::vector<LocalModelConfig> configured_local_engines;
+    std::vector<CloudConfig> configured_remote_backends;
     std::string last_error;
 };
 
@@ -480,10 +495,17 @@ struct InferenceEvent {
     InferenceErrorKind error_kind = InferenceErrorKind::kNone;
     std::string route_reason;
     std::string fallback_reason;
+    std::string initial_engine_id;
+    std::string initial_backend_id;
+    std::string initial_model_id;
+    std::string initial_model_alias;
+    std::string initial_execution_mode;
     std::string engine_id;
     std::string backend_id;
     std::string model_id;
     std::string model_alias;
+    std::string display_name;
+    std::string execution_mode;
     double total_latency_ms = 0.0;
     double local_latency_ms = 0.0;
     double cloud_latency_ms = 0.0;

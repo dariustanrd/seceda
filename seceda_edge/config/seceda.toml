@@ -1,0 +1,242 @@
+# Seceda configuration
+#
+# This file is intended to be the main human-edited source of truth for how the
+# edge daemon should run. The daemon will load it automatically when started
+# from the repo root, or you can point at a different file with:
+#
+#   --config /path/to/seceda.toml
+#
+# CLI flags still work and override values from this file. That makes this file
+# a good "base profile", while one-off experiments can still be done on the
+# command line.
+#
+# Recommended precedence:
+#   1. Built-in defaults
+#   2. This TOML file
+#   3. Environment variables for secrets or deployment overrides
+#   4. CLI flags for one-off local changes
+
+schema_version = 1
+
+[daemon]
+# Host interface to bind the HTTP server to.
+host = "0.0.0.0"
+
+# TCP port for the daemon HTTP server.
+port = 8080
+
+# The default public model alias returned by GET /v1/models and accepted by
+# POST /v1/chat/completions.
+public_model_alias = "seceda/default"
+
+# Optional system prompt automatically prepended when the caller does not
+# already provide one.
+default_system_prompt = ""
+
+# Prompt used during runtime warmup after the local engine loads.
+warmup_prompt = "Hello from Seceda."
+
+[generation]
+# Default completion budget when callers omit max_tokens or
+# max_completion_tokens.
+max_completion_tokens = 128
+
+# Default sampling settings.
+temperature = 0.7
+top_p = 0.9
+top_k = 40
+min_p = 0.05
+
+# Sampling seed. 4294967295 keeps the current "use upstream default/random"
+# behavior.
+seed = 4294967295
+
+[router]
+# Requests above either of these thresholds may be routed to cloud depending on
+# the rest of the request.
+max_prompt_chars = 800
+max_estimated_tokens = 256
+
+# Keyword hints for automatic routing. Tune these to match your workload and
+# the kinds of tasks your local model can or cannot handle well.
+structured_keywords = [
+  "json",
+  "schema",
+  "sql",
+  "typescript",
+  "javascript",
+  "python",
+  "yaml",
+  "xml",
+  "csv",
+  "formal proof",
+]
+
+cloud_keywords = [
+  "analyze",
+  "compare",
+  "plan",
+  "strategy",
+  "architecture",
+  "reason",
+  "step by step",
+  "research",
+]
+
+freshness_keywords = [
+  "today",
+  "latest",
+  "current",
+  "recent",
+  "news",
+  "weather",
+  "price",
+  "stock",
+]
+
+[local]
+# Selects which local engine profile is active right now.
+#
+# Keep multiple engines in this file so a later TUI/GUI can switch between them
+# without needing a new schema. Today the daemon still runs one active local
+# engine at a time.
+active_engine = "llama-default"
+
+[local.engines.llama-default]
+# Stable identity for metrics, events, and /info.
+engine_id = "local/llama.cpp"
+backend_id = "local"
+model_id = "local-default"
+model_alias = "local/default"
+display_name = "Seceda local llama.cpp"
+
+# Supported values today:
+#   - "in_process"
+#   - "sidecar_server"
+#   - "sdk_bridge" (reserved for future adapters)
+execution_mode = "in_process"
+
+# Advertised capabilities for this local engine profile.
+capabilities = ["chat.completions", "text", "stream"]
+
+# Set this to your GGUF model path. Leave it empty until you have a local model
+# downloaded, then either edit it here or override it with --model-path.
+model_path = ""
+
+# llama.cpp tuning knobs.
+context_size = 2048
+batch_size = 2048
+n_gpu_layers = 99
+n_threads = -1
+n_threads_batch = -1
+
+# Example sidecar profile. Uncomment and customize when you want Seceda to talk
+# to a localhost OpenAI-compatible model server instead of loading a GGUF
+# in-process.
+#
+#[local.engines.sidecar-dev]
+#engine_id = "local/sidecar"
+#backend_id = "local/sidecar"
+#model_id = "sidecar-default"
+#model_alias = "local/sidecar"
+#display_name = "Local sidecar server"
+#execution_mode = "sidecar_server"
+#capabilities = ["chat.completions", "text", "stream", "tools", "response_format"]
+#sidecar_base_url = "http://127.0.0.1:8081"
+#sidecar_timeout_seconds = 120
+#sidecar_connect_timeout_seconds = 10
+#sidecar_verify_tls = true
+
+[remote]
+# The default named remote backend used when routing to cloud without a more
+# specific alias or backend hint.
+default_backend = "modal-default"
+
+[remote.backends.modal-default]
+backend_id = "remote/modal-default"
+model = "seceda-cloud-default"
+model_alias = "remote/default"
+display_name = "Seceda remote backend"
+execution_mode = "remote_service"
+capabilities = ["chat.completions", "text", "stream", "tools", "response_format"]
+
+# Base URL for an OpenAI-compatible remote backend. Leave this empty if you only
+# want local inference for now, then set it once your remote backend is live.
+base_url = ""
+
+# You can put api_key here, but using SECEDA_CLOUD_API_KEY is usually better so
+# secrets stay out of files and commits.
+api_key = ""
+
+timeout_seconds = 120
+connect_timeout_seconds = 10
+retry_attempts = 2
+retry_backoff_ms = 1000
+
+# When true, Seceda adds a request-scoped Modal-Session-ID header that is reused
+# across retries for the same logical request.
+send_modal_session_id = false
+
+# Disable only for local development endpoints you explicitly trust.
+verify_tls = true
+
+# Example alternate backend profile. Uncomment when you want multiple named
+# remote targets that can be selected by alias or future UI controls.
+#
+#[remote.backends.alt]
+#backend_id = "remote/alt"
+#model = "remote-alt-model"
+#model_alias = "remote/alt"
+#display_name = "Alternate remote backend"
+#execution_mode = "remote_service"
+#capabilities = ["chat.completions", "text", "stream", "tools", "response_format"]
+#base_url = "https://example-alt/v1"
+#api_key = ""
+#timeout_seconds = 120
+#connect_timeout_seconds = 10
+#retry_attempts = 2
+#retry_backoff_ms = 1000
+#send_modal_session_id = false
+#verify_tls = true
+
+[observability]
+# Number of recent inference events retained in memory for /metrics/events.
+event_log_capacity = 2048
+
+# Exposed models define what the daemon advertises publicly to OpenAI-compatible
+# clients. Keep these aligned with the local and remote aliases you want users
+# or tools to target.
+#
+# route_target:
+#   - "auto"  : let Seceda decide
+#   - "local" : force local
+#   - "cloud" : force remote
+
+[[exposed_models]]
+id = "seceda/default"
+display_name = "Seceda default route"
+owned_by = "seceda"
+route_target = "auto"
+
+[[exposed_models]]
+id = "local/default"
+display_name = "Seceda local llama.cpp"
+owned_by = "seceda"
+route_target = "local"
+engine_id = "local/llama.cpp"
+backend_id = "local"
+model_id = "local-default"
+model_alias = "local/default"
+execution_mode = "in_process"
+capabilities = ["chat.completions", "text", "stream"]
+
+[[exposed_models]]
+id = "remote/default"
+display_name = "Seceda remote backend"
+owned_by = "seceda"
+route_target = "cloud"
+backend_id = "remote/modal-default"
+model_id = "seceda-cloud-default"
+model_alias = "remote/default"
+execution_mode = "remote_service"
+capabilities = ["chat.completions", "text", "stream", "tools", "response_format"]
