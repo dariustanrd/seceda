@@ -1,4 +1,5 @@
 #include "openai_compat/openai_compat.hpp"
+#include "json_utils/read_optional.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -6,40 +7,9 @@
 
 namespace seceda::edge::openai_compat {
 
+namespace ju = seceda::edge::json_utils;
+
 namespace {
-
-bool read_int(const json & object, const char * key, int & out) {
-    if (!object.contains(key)) {
-        return true;
-    }
-    if (!object[key].is_number_integer()) {
-        return false;
-    }
-    out = object[key].get<int>();
-    return true;
-}
-
-bool read_uint(const json & object, const char * key, std::uint32_t & out) {
-    if (!object.contains(key)) {
-        return true;
-    }
-    if (!object[key].is_number_integer()) {
-        return false;
-    }
-    out = object[key].get<std::uint32_t>();
-    return true;
-}
-
-bool read_float(const json & object, const char * key, float & out) {
-    if (!object.contains(key)) {
-        return true;
-    }
-    if (!object[key].is_number()) {
-        return false;
-    }
-    out = object[key].get<float>();
-    return true;
-}
 
 bool is_known_model(const std::vector<ModelCatalogEntry> & models, const std::string & model_id) {
     for (const auto & model : models) {
@@ -401,11 +371,11 @@ bool parse_chat_completion_request_impl(
     }
 
     if (!read_completion_token_limit_impl(parsed, request.options.max_completion_tokens, error) ||
-        !read_float(parsed, "temperature", request.options.temperature) ||
-        !read_float(parsed, "top_p", request.options.top_p) ||
-        !read_int(parsed, "top_k", request.options.top_k) ||
-        !read_float(parsed, "min_p", request.options.min_p) ||
-        !read_uint(parsed, "seed", request.options.seed)) {
+        !ju::read_optional_float(parsed, "temperature", request.options.temperature) ||
+        !ju::read_optional_float(parsed, "top_p", request.options.top_p) ||
+        !ju::read_optional_integer(parsed, "top_k", request.options.top_k) ||
+        !ju::read_optional_float(parsed, "min_p", request.options.min_p) ||
+        !ju::read_optional_integer(parsed, "seed", request.options.seed)) {
         if (error.empty()) {
             error = "One or more generation controls had an invalid type";
         }

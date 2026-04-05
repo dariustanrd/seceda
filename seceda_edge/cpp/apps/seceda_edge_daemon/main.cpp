@@ -1,4 +1,5 @@
 #include "cloud_bridge/cloud_client.hpp"
+#include "json_utils/read_optional.hpp"
 #include "local_models/local_engine_registry.hpp"
 #include "router/heuristic_router.hpp"
 #include "openai_compat/openai_compat.hpp"
@@ -18,6 +19,7 @@ namespace {
 
 using json = nlohmann::json;
 using namespace seceda::edge;
+namespace ju = seceda::edge::json_utils;
 namespace oa = seceda::edge::openai_compat;
 
 json router_config_to_json(const RouterConfig & config) {
@@ -234,39 +236,6 @@ json event_to_json(const InferenceEvent & event) {
     };
 }
 
-bool read_int(const json & object, const char * key, int & out) {
-    if (!object.contains(key)) {
-        return true;
-    }
-    if (!object[key].is_number_integer()) {
-        return false;
-    }
-    out = object[key].get<int>();
-    return true;
-}
-
-bool read_uint(const json & object, const char * key, std::uint32_t & out) {
-    if (!object.contains(key)) {
-        return true;
-    }
-    if (!object[key].is_number_integer()) {
-        return false;
-    }
-    out = object[key].get<std::uint32_t>();
-    return true;
-}
-
-bool read_float(const json & object, const char * key, float & out) {
-    if (!object.contains(key)) {
-        return true;
-    }
-    if (!object[key].is_number()) {
-        return false;
-    }
-    out = object[key].get<float>();
-    return true;
-}
-
 bool parse_inference_request(
     const std::string & body,
     const DaemonConfig & config,
@@ -318,11 +287,11 @@ bool parse_inference_request(
 
         const auto & options = parsed["options"];
         if (!oa::read_completion_token_limit(options, request.options.max_completion_tokens, error) ||
-            !read_float(options, "temperature", request.options.temperature) ||
-            !read_float(options, "top_p", request.options.top_p) ||
-            !read_int(options, "top_k", request.options.top_k) ||
-            !read_float(options, "min_p", request.options.min_p) ||
-            !read_uint(options, "seed", request.options.seed)) {
+            !ju::read_optional_float(options, "temperature", request.options.temperature) ||
+            !ju::read_optional_float(options, "top_p", request.options.top_p) ||
+            !ju::read_optional_integer(options, "top_k", request.options.top_k) ||
+            !ju::read_optional_float(options, "min_p", request.options.min_p) ||
+            !ju::read_optional_integer(options, "seed", request.options.seed)) {
             if (error.empty()) {
                 error = "One or more generation options had an invalid type";
             }
