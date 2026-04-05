@@ -3,4 +3,6 @@ seceda_add_edge_library(
     SOURCES
         simple_toml.cpp
         config_catalog.cpp
+    EXTRA_INCLUDES
+        ${tomlplusplus_SOURCE_DIR}
 )

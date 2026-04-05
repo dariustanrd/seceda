@@ -17,6 +17,15 @@ set(
 
 set(SECEDA_LLAMA_VENDOR_DIR ${SECEDA_LLAMA_CPP_DIR}/vendor)
 
+include(FetchContent)
+
+FetchContent_Declare(
+    tomlplusplus
+    URL https://github.com/marzer/tomlplusplus/archive/refs/tags/v3.3.0.tar.gz
+)
+message(STATUS "Fetching toml++ v3.3.0")
+FetchContent_MakeAvailable(tomlplusplus)
+
 if(SECEDA_BUILD_LLAMA_CPP)
     set(LLAMA_CPP_INCLUDE_DIRS ${LLAMA_CPP_INSTALL_DIR}/include)
     set(LLAMA_CPP_LIBRARY_DIRS ${LLAMA_CPP_INSTALL_DIR}/lib)

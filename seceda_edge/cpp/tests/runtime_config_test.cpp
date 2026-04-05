@@ -286,6 +286,10 @@ int main() {
                 << "\n"
                 << "[router]\n"
                 << "max_prompt_chars = 1234\n"
+                << "structured_keywords = [\n"
+                << "  \"json\",\n"
+                << "  \"schema\",\n"
+                << "]\n"
                 << "\n"
                 << "[[exposed_models]]\n"
                 << "id = \"remote/default\"\n"
@@ -352,6 +356,12 @@ int main() {
         if (!require(
                 config.router.max_prompt_chars == 1234,
                 "router settings should load from TOML config")) {
+            std::filesystem::remove(temp_path);
+            return 1;
+        }
+        if (!require(
+                config.router.structured_keywords == std::vector<std::string>{"json", "schema"},
+                "multiline string arrays should load from TOML config")) {
             std::filesystem::remove(temp_path);
             return 1;
         }
