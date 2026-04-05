@@ -295,24 +295,39 @@ bool parse_openai_request_features(
     return true;
 }
 
+const ModelCatalogEntry * find_model_catalog_entry(
+    const std::vector<ModelCatalogEntry> & models,
+    const std::string & model_id) {
+    for (const auto & model : models) {
+        if (model.id == model_id) {
+            return &model;
+        }
+    }
+    return nullptr;
+}
+
 void apply_model_selection_hints(
     const DaemonConfig & config,
     InferenceRequest & request) {
     request.seceda.preferred_model_alias = request.model;
 
-    if (request.model == config.local.model_alias) {
-        request.seceda.route_override = RouteTarget::kLocal;
-        request.seceda.preferred_engine_id = config.local.engine_id;
-        request.seceda.preferred_backend_id = config.local.backend_id;
-        request.seceda.preferred_model_alias = config.local.model_alias;
+    const auto catalog = configured_model_catalog(config);
+    const ModelCatalogEntry * const selected = find_model_catalog_entry(catalog, request.model);
+    if (selected == nullptr) {
         return;
     }
 
-    if (request.model == config.cloud.model_alias) {
-        request.seceda.route_override = RouteTarget::kCloud;
-        request.seceda.preferred_backend_id = config.cloud.backend_id;
-        request.seceda.preferred_model_alias = config.cloud.model_alias;
-        return;
+    if (selected->route_target != RouteTarget::kAuto) {
+        request.seceda.route_override = selected->route_target;
+    }
+    if (!selected->engine_id.empty()) {
+        request.seceda.preferred_engine_id = selected->engine_id;
+    }
+    if (!selected->backend_id.empty()) {
+        request.seceda.preferred_backend_id = selected->backend_id;
+    }
+    if (!selected->model_alias.empty()) {
+        request.seceda.preferred_model_alias = selected->model_alias;
     }
 }
 

@@ -10,10 +10,7 @@ LocalEngineRegistry::LocalEngineRegistry()
           "integration."),
       runanywhere_stub_(
           "RunAnywhere SDK bridge adapter is not implemented yet; reserved for a future "
-          "RunAnywhere integration."),
-      sidecar_stub_(
-          "Local sidecar (OpenAI-compatible HTTP) adapter is not implemented yet; reserved for "
-          "routing to a localhost model server.") {}
+          "RunAnywhere integration.") {}
 
 LocalEngineRegistry::~LocalEngineRegistry() = default;
 
@@ -37,7 +34,7 @@ ILocalModelRuntime * LocalEngineRegistry::resolve_delegate(
             delegate_ = &runanywhere_stub_;
             return delegate_;
         case ResolvedLocalEngine::kSidecarServer:
-            delegate_ = &sidecar_stub_;
+            delegate_ = &sidecar_;
             return delegate_;
         case ResolvedLocalEngine::kUnknown:
             delegate_ = nullptr;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "local_models/llama_runtime.hpp"
+#include "local_models/sidecar_local_engine_adapter.hpp"
 #include "local_models/stub_local_engine_adapter.hpp"
 #include "runtime/interfaces.hpp"
 
@@ -39,7 +40,7 @@ private:
     LlamaRuntime llama_;
     StubLocalEngineAdapter cactus_stub_;
     StubLocalEngineAdapter runanywhere_stub_;
-    StubLocalEngineAdapter sidecar_stub_;
+    SidecarLocalEngineAdapter sidecar_;
 
     mutable std::mutex mutex_;
     ILocalModelRuntime * delegate_ = nullptr;

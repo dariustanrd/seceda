@@ -42,6 +42,32 @@ void hydrate_assistant_message(InferenceResponse & response) {
     }
 }
 
+bool capabilities_include(
+    const std::vector<std::string> & capabilities,
+    const std::string & required_capability) {
+    for (const auto & capability : capabilities) {
+        if (capability == required_capability) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool local_runtime_supports_request_features(
+    const InferenceRequest & request,
+    const LocalModelInfo & info) {
+    if (request.capabilities.has_tools || request.capabilities.requests_tool_choice) {
+        if (!capabilities_include(info.capabilities, "tools")) {
+            return false;
+        }
+    }
+    if (request.capabilities.requests_structured_output &&
+        !capabilities_include(info.capabilities, "response_format")) {
+        return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 RequestExecutor::RequestExecutor(
@@ -194,7 +220,8 @@ InferenceResponse RequestExecutor::execute_local(
         response.initial_identity = local_identity_from_info(local_info);
     }
 
-    if (request.capabilities.requires_remote_backend) {
+    if (request.capabilities.requires_remote_backend &&
+        !local_runtime_supports_request_features(request, local_info)) {
         if (allow_cloud_fallback && cloud_client_.is_configured()) {
             response.fallback_used = true;
             response.fallback_reason = "remote_capability_required";
@@ -321,7 +348,8 @@ InferenceResponse RequestExecutor::execute_local_streaming(
         response.initial_identity = local_identity_from_info(local_info);
     }
 
-    if (request.capabilities.requires_remote_backend) {
+    if (request.capabilities.requires_remote_backend &&
+        !local_runtime_supports_request_features(request, local_info)) {
         if (!stream_started && allow_cloud_fallback && cloud_client_.is_configured()) {
             response.fallback_used = true;
             response.fallback_reason = "remote_capability_required";

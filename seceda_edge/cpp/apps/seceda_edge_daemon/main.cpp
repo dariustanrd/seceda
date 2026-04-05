@@ -41,6 +41,7 @@ json local_model_info_to_json(const LocalModelInfo & info) {
         {"execution_mode", info.execution_mode},
         {"capabilities", info.capabilities},
         {"model_path", info.model_path},
+        {"endpoint_base_url", info.endpoint_base_url},
         {"description", info.description},
         {"last_error", info.last_error},
         {"context_size", info.context_size},
@@ -51,6 +52,23 @@ json local_model_info_to_json(const LocalModelInfo & info) {
         {"parameter_count", info.parameter_count},
         {"trained_context_size", info.trained_context_size},
         {"layer_count", info.layer_count},
+    };
+}
+
+json local_model_config_to_json(const LocalModelConfig & config) {
+    return {
+        {"engine_id", config.engine_id},
+        {"backend_id", config.backend_id},
+        {"model_id", config.model_id},
+        {"model_alias", config.model_alias},
+        {"display_name", config.display_name},
+        {"execution_mode", config.execution_mode},
+        {"capabilities", config.capabilities},
+        {"model_path", config.model_path},
+        {"sidecar_base_url", config.sidecar_base_url},
+        {"sidecar_timeout_seconds", config.sidecar_timeout_seconds},
+        {"sidecar_connect_timeout_seconds", config.sidecar_connect_timeout_seconds},
+        {"sidecar_verify_tls", config.sidecar_verify_tls},
     };
 }
 
@@ -73,6 +91,24 @@ json cloud_client_info_to_json(const CloudClientInfo & info) {
     };
 }
 
+json cloud_config_to_json(const CloudConfig & config) {
+    return {
+        {"backend_id", config.backend_id},
+        {"model", config.model},
+        {"model_alias", config.model_alias},
+        {"display_name", config.display_name},
+        {"execution_mode", config.execution_mode},
+        {"capabilities", config.capabilities},
+        {"base_url", config.base_url},
+        {"timeout_seconds", config.timeout_seconds},
+        {"connect_timeout_seconds", config.connect_timeout_seconds},
+        {"retry_attempts", config.retry_attempts},
+        {"retry_backoff_ms", config.retry_backoff_ms},
+        {"send_modal_session_id", config.send_modal_session_id},
+        {"verify_tls", config.verify_tls},
+    };
+}
+
 json health_to_json(const HealthSnapshot & health) {
     return {
         {"state", to_string(health.state)},
@@ -89,6 +125,16 @@ json info_to_json(const InfoSnapshot & info) {
         exposed_models.push_back(oa::model_catalog_entry_json(model));
     }
 
+    json configured_local_engines = json::array();
+    for (const auto & engine : info.configured_local_engines) {
+        configured_local_engines.push_back(local_model_config_to_json(engine));
+    }
+
+    json configured_remote_backends = json::array();
+    for (const auto & backend : info.configured_remote_backends) {
+        configured_remote_backends.push_back(cloud_config_to_json(backend));
+    }
+
     return {
         {"state", to_string(info.state)},
         {"host", info.host},
@@ -96,6 +142,8 @@ json info_to_json(const InfoSnapshot & info) {
         {"default_system_prompt", info.default_system_prompt},
         {"public_model_alias", info.public_model_alias},
         {"exposed_models", std::move(exposed_models)},
+        {"configured_local_engines", std::move(configured_local_engines)},
+        {"configured_remote_backends", std::move(configured_remote_backends)},
         {"router", router_config_to_json(info.router_config)},
         {"local_model", local_model_info_to_json(info.local_model)},
         {"cloud_client", cloud_client_info_to_json(info.cloud_client)},
@@ -169,10 +217,17 @@ json event_to_json(const InferenceEvent & event) {
         {"error_kind", to_string(event.error_kind)},
         {"route_reason", event.route_reason},
         {"fallback_reason", event.fallback_reason},
+        {"initial_engine_id", event.initial_engine_id},
+        {"initial_backend_id", event.initial_backend_id},
+        {"initial_model_id", event.initial_model_id},
+        {"initial_model_alias", event.initial_model_alias},
+        {"initial_execution_mode", event.initial_execution_mode},
         {"engine_id", event.engine_id},
         {"backend_id", event.backend_id},
         {"model_id", event.model_id},
         {"model_alias", event.model_alias},
+        {"display_name", event.display_name},
+        {"execution_mode", event.execution_mode},
         {"total_latency_ms", event.total_latency_ms},
         {"local_latency_ms", event.local_latency_ms},
         {"cloud_latency_ms", event.cloud_latency_ms},
@@ -331,7 +386,7 @@ int main(int argc, char ** argv) {
     }
 
     auto local_runtime = std::make_shared<LocalEngineRegistry>();
-    auto cloud_client = std::make_shared<CloudClient>(config.cloud);
+    auto cloud_client = std::make_shared<CloudClient>(config.cloud, config.remote_backends);
     auto router = std::make_shared<HeuristicRouter>(config.router);
 
     EdgeDaemon daemon(config, local_runtime, cloud_client, router);

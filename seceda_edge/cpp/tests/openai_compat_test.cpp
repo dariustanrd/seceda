@@ -192,6 +192,80 @@ bool test_models_list_payload() {
     return true;
 }
 
+bool test_named_remote_backend_alias_uses_catalog_metadata() {
+    DaemonConfig cfg = default_config();
+    cfg.remote_backends.push_back(
+        CloudConfig{
+            "remote/alt",
+            "remote-alt-model",
+            "remote/alt",
+            "Remote Alt",
+            "remote_service",
+            {"chat.completions", "text", "stream", "tools", "response_format"},
+            "http://127.0.0.1:9090",
+            {},
+            30,
+            5,
+            0,
+            0,
+            false,
+            true,
+        });
+    cfg.exposed_models.push_back(
+        {
+            "remote/alt",
+            "Remote Alt",
+            "seceda",
+            RouteTarget::kCloud,
+            {},
+            "remote/alt",
+            "remote-alt-model",
+            "remote/alt",
+            "remote_service",
+            {"chat.completions", "text", "stream"},
+        });
+
+    const json body = {
+        {"model", "remote/alt"},
+        {"messages", json::array({{{"role", "user"}, {"content", "Hello"}}})},
+    };
+
+    InferenceRequest req;
+    std::string err;
+    if (!require(oa::parse_chat_completion_request(body.dump(), cfg, req, err), err.c_str())) {
+        return false;
+    }
+    if (!require(req.seceda.route_override == RouteTarget::kCloud, "catalog metadata should force cloud")) {
+        return false;
+    }
+    if (!require(
+            req.seceda.preferred_backend_id == "remote/alt",
+            "catalog metadata should select named backend id")) {
+        return false;
+    }
+    if (!require(
+            req.seceda.preferred_model_alias == "remote/alt",
+            "catalog metadata should preserve model alias")) {
+        return false;
+    }
+
+    const json models = oa::models_list_payload(cfg);
+    bool saw_metadata = false;
+    for (const auto & row : models["data"]) {
+        if (row["id"] == "remote/alt" &&
+            row.contains("metadata") &&
+            row["metadata"]["backend_id"] == "remote/alt") {
+            saw_metadata = true;
+            break;
+        }
+    }
+    if (!require(saw_metadata, "named remote alias should expose metadata in /v1/models")) {
+        return false;
+    }
+
+    return true;
+}
+
 bool test_openai_error_mapping() {
     InferenceResponse bad;
     bad.ok = false;
@@ -246,6 +320,7 @@ int main() {
     if (!test_parse_basic_fixture() || !test_unknown_model() || !test_tools_passthrough_fixture() ||
         !test_model_alias_sets_explicit_local_selection() ||
         !test_model_alias_sets_explicit_remote_selection() || !test_models_list_payload() ||
+        !test_named_remote_backend_alias_uses_catalog_metadata() ||
         !test_openai_error_mapping() ||
         !test_read_completion_token_limit_shared_with_inference_options()) {
         return 1;

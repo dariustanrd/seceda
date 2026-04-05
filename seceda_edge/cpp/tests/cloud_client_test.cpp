@@ -363,6 +363,81 @@ bool test_partial_stream_returns_error() {
     return true;
 }
 
+bool test_named_backend_selection_by_model_alias() {
+    TestServer default_server;
+    TestServer alt_server;
+    if (!require(default_server.start(), "default server should start")) {
+        return false;
+    }
+    if (!require(alt_server.start(), "alt server should start")) {
+        return false;
+    }
+
+    std::atomic<int> default_hits = 0;
+    std::atomic<int> alt_hits = 0;
+
+    default_server.server().Post(
+        "/v1/chat/completions",
+        [&](const httplib::Request &, httplib::Response & response) {
+            ++default_hits;
+            response.set_content(
+                R"({"choices":[{"message":{"content":"default"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}})",
+                "application/json");
+        });
+
+    alt_server.server().Post(
+        "/v1/chat/completions",
+        [&](const httplib::Request &, httplib::Response & response) {
+            ++alt_hits;
+            response.set_content(
+                R"({"choices":[{"message":{"content":"alt"}}],"usage":{"prompt_tokens":2,"completion_tokens":1}})",
+                "application/json");
+        });
+
+    CloudConfig default_config;
+    default_config.backend_id = "remote/default";
+    default_config.model = "default-model";
+    default_config.model_alias = "remote/default";
+    default_config.base_url = default_server.base_url();
+    default_config.timeout_seconds = 5;
+    default_config.connect_timeout_seconds = 2;
+    default_config.retry_attempts = 0;
+    default_config.retry_backoff_ms = 0;
+
+    CloudConfig alt_config = default_config;
+    alt_config.backend_id = "remote/alt";
+    alt_config.model = "alt-model";
+    alt_config.model_alias = "remote/alt";
+    alt_config.base_url = alt_server.base_url();
+
+    CloudClient client(default_config, {alt_config});
+
+    InferenceRequest request;
+    request.messages.push_back({"user", "route to alt", {}, {}, {}});
+    request.seceda.preferred_backend_id = "remote/alt";
+    request.seceda.preferred_model_alias = "remote/alt";
+    refresh_request_views(request);
+
+    const auto result = client.complete(request);
+    if (!require(result.ok, "named backend request should succeed")) {
+        return false;
+    }
+    if (!require(result.text == "alt", "named backend should route to alternate backend")) {
+        return false;
+    }
+    if (!require(result.identity.backend_id == "remote/alt", "result identity should reflect named backend")) {
+        return false;
+    }
+    if (!require(default_hits.load() == 0, "default backend should not be used")) {
+        return false;
+    }
+    if (!require(alt_hits.load() == 1, "alternate backend should be used exactly once")) {
+        return false;
+    }
+
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -376,6 +451,9 @@ int main() {
         return 1;
     }
     if (!test_partial_stream_returns_error()) {
+        return 1;
+    }
+    if (!test_named_backend_selection_by_model_alias()) {
         return 1;
     }
 

@@ -3,6 +3,21 @@
 #include <utility>
 
 namespace seceda::edge {
+namespace {
+
+bool is_sidecar_execution_mode(const std::string & raw_mode) {
+    return raw_mode == "sidecar_server" || raw_mode == "sidecar-server" || raw_mode == "sidecar";
+}
+
+bool has_local_runtime_configuration(const LocalModelConfig & config) {
+    if (is_sidecar_execution_mode(config.execution_mode)) {
+        return !config.sidecar_base_url.empty();
+    }
+
+    return !config.model_path.empty();
+}
+
+}  // namespace
 
 EdgeDaemon::EdgeDaemon(
     DaemonConfig config,
@@ -26,7 +41,7 @@ bool EdgeDaemon::initialize() {
         last_error_.clear();
     }
 
-    if (!config_.local.model_path.empty()) {
+    if (has_local_runtime_configuration(config_.local)) {
         local_ready = local_runtime_->load(config_.local, config_.warmup_prompt, error);
     } else {
         error = "No local model configured";
@@ -147,6 +162,8 @@ InfoSnapshot EdgeDaemon::info() const {
     snapshot.router_config = router_->config();
     snapshot.local_model = local_runtime_->info();
     snapshot.cloud_client = cloud_client_->info();
+    snapshot.configured_local_engines = config_.local_engines;
+    snapshot.configured_remote_backends = config_.remote_backends;
     snapshot.last_error = last_error_;
     return snapshot;
 }

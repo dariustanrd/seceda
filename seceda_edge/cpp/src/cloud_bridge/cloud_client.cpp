@@ -591,29 +591,84 @@ size_t curl_write_callback(char * data, size_t size, size_t count, void * user_d
 
 }  // namespace
 
-CloudClient::CloudClient(CloudConfig config) : config_(std::move(config)) {}
+CloudClient::CloudClient(CloudConfig config, std::vector<CloudConfig> named_backends)
+    : config_(std::move(config)),
+      named_backends_(std::move(named_backends)) {}
 
 bool CloudClient::is_configured() const {
-    return !config_.base_url.empty();
+    return default_backend() != nullptr && !default_backend()->base_url.empty();
 }
 
 CloudClientInfo CloudClient::info() const {
+    const CloudConfig * const backend = default_backend();
     CloudClientInfo info;
-    info.configured = is_configured();
-    info.backend_id = config_.backend_id;
-    info.base_url = config_.base_url;
-    info.model = config_.model;
-    info.model_alias = config_.model_alias;
-    info.display_name = config_.display_name;
-    info.execution_mode = config_.execution_mode;
-    info.capabilities = config_.capabilities;
-    info.timeout_seconds = config_.timeout_seconds;
-    info.connect_timeout_seconds = config_.connect_timeout_seconds;
-    info.retry_attempts = config_.retry_attempts;
-    info.retry_backoff_ms = config_.retry_backoff_ms;
-    info.send_modal_session_id = config_.send_modal_session_id;
-    info.verify_tls = config_.verify_tls;
+    info.configured = backend != nullptr && !backend->base_url.empty();
+    if (backend == nullptr) {
+        return info;
+    }
+
+    info.backend_id = backend->backend_id;
+    info.base_url = backend->base_url;
+    info.model = backend->model;
+    info.model_alias = backend->model_alias;
+    info.display_name = backend->display_name;
+    info.execution_mode = backend->execution_mode;
+    info.capabilities = backend->capabilities;
+    info.timeout_seconds = backend->timeout_seconds;
+    info.connect_timeout_seconds = backend->connect_timeout_seconds;
+    info.retry_attempts = backend->retry_attempts;
+    info.retry_backoff_ms = backend->retry_backoff_ms;
+    info.send_modal_session_id = backend->send_modal_session_id;
+    info.verify_tls = backend->verify_tls;
     return info;
+}
+
+const CloudConfig * CloudClient::default_backend() const {
+    if (!config_.base_url.empty()) {
+        return &config_;
+    }
+    for (const auto & backend : named_backends_) {
+        if (!backend.base_url.empty()) {
+            return &backend;
+        }
+    }
+    return nullptr;
+}
+
+const CloudConfig * CloudClient::select_backend(const InferenceRequest & request) const {
+    const auto select_match = [&](const auto & predicate) -> const CloudConfig * {
+        if (predicate(config_)) {
+            return &config_;
+        }
+        for (const auto & backend : named_backends_) {
+            if (predicate(backend)) {
+                return &backend;
+            }
+        }
+        return nullptr;
+    };
+
+    if (!request.seceda.preferred_backend_id.empty()) {
+        if (const CloudConfig * const matched =
+                select_match([&](const CloudConfig & backend) {
+                    return backend.backend_id == request.seceda.preferred_backend_id &&
+                        !backend.base_url.empty();
+                })) {
+            return matched;
+        }
+    }
+
+    if (!request.seceda.preferred_model_alias.empty()) {
+        if (const CloudConfig * const matched =
+                select_match([&](const CloudConfig & backend) {
+                    return backend.model_alias == request.seceda.preferred_model_alias &&
+                        !backend.base_url.empty();
+                })) {
+            return matched;
+        }
+    }
+
+    return default_backend();
 }
 
 CloudCompletionResult CloudClient::complete(const InferenceRequest & request) {
@@ -630,7 +685,8 @@ CloudCompletionResult CloudClient::complete_impl(
     const InferenceRequest & request,
     const StreamDeltaCallback * on_delta) {
     CloudCompletionResult result;
-    if (!is_configured()) {
+    const CloudConfig * const backend = select_backend(request);
+    if (backend == nullptr || backend->base_url.empty()) {
         result.error = "Cloud fallback is not configured";
         return result;
     }
@@ -642,16 +698,16 @@ CloudCompletionResult CloudClient::complete_impl(
 
     result.message.role = "assistant";
     result.identity.route_target = RouteTarget::kCloud;
-    result.identity.backend_id = config_.backend_id;
-    result.identity.model_id = config_.model;
-    result.identity.model_alias = config_.model_alias;
-    result.identity.display_name = config_.display_name;
-    result.identity.execution_mode = config_.execution_mode;
-    result.identity.capabilities = config_.capabilities;
+    result.identity.backend_id = backend->backend_id;
+    result.identity.model_id = backend->model;
+    result.identity.model_alias = backend->model_alias;
+    result.identity.display_name = backend->display_name;
+    result.identity.execution_mode = backend->execution_mode;
+    result.identity.capabilities = backend->capabilities;
 
     const bool upstream_stream = request.options.stream || !wants_rich_openai_response(request);
     json body = {
-        {"model", config_.model},
+        {"model", backend->model},
         {"messages", json::array()},
         {"max_tokens", request.options.max_completion_tokens},
         {"temperature", request.options.temperature},
@@ -698,12 +754,12 @@ CloudCompletionResult CloudClient::complete_impl(
     }
 
     const std::string body_string = body.dump();
-    const std::string request_url = completion_url(config_.base_url);
+    const std::string request_url = completion_url(backend->base_url);
     const auto request_start = std::chrono::steady_clock::now();
-    const auto request_deadline = request_start + std::chrono::seconds(config_.timeout_seconds);
-    const int max_attempts = std::max(1, config_.retry_attempts + 1);
+    const auto request_deadline = request_start + std::chrono::seconds(backend->timeout_seconds);
+    const int max_attempts = std::max(1, backend->retry_attempts + 1);
     const std::string modal_session_id =
-        config_.send_modal_session_id ? generate_modal_session_id() : std::string{};
+        backend->send_modal_session_id ? generate_modal_session_id() : std::string{};
 
     for (int attempt = 0; attempt < max_attempts; ++attempt) {
         const auto attempt_start = std::chrono::steady_clock::now();
@@ -735,12 +791,12 @@ CloudCompletionResult CloudClient::complete_impl(
         result = CloudCompletionResult{};
         result.message.role = "assistant";
         result.identity.route_target = RouteTarget::kCloud;
-        result.identity.backend_id = config_.backend_id;
-        result.identity.model_id = config_.model;
-        result.identity.model_alias = config_.model_alias;
-        result.identity.display_name = config_.display_name;
-        result.identity.execution_mode = config_.execution_mode;
-        result.identity.capabilities = config_.capabilities;
+        result.identity.backend_id = backend->backend_id;
+        result.identity.model_id = backend->model;
+        result.identity.model_alias = backend->model_alias;
+        result.identity.display_name = backend->display_name;
+        result.identity.execution_mode = backend->execution_mode;
+        result.identity.capabilities = backend->capabilities;
 
         CURL * curl = curl_easy_init();
         if (curl == nullptr) {
@@ -751,8 +807,8 @@ CloudCompletionResult CloudClient::complete_impl(
         struct curl_slist * headers = nullptr;
         headers = curl_slist_append(headers, "Content-Type: application/json");
         headers = curl_slist_append(headers, "Accept: text/event-stream");
-        const std::string auth_header = "Authorization: Bearer " + config_.api_key;
-        if (!config_.api_key.empty()) {
+        const std::string auth_header = "Authorization: Bearer " + backend->api_key;
+        if (!backend->api_key.empty()) {
             headers = curl_slist_append(headers, auth_header.c_str());
         }
 
@@ -766,7 +822,7 @@ CloudCompletionResult CloudClient::complete_impl(
         const long timeout_ms = static_cast<long>(remaining_ms);
         const long connect_timeout_ms = static_cast<long>(std::min<std::int64_t>(
             remaining_ms,
-            static_cast<std::int64_t>(config_.connect_timeout_seconds) * 1000));
+            static_cast<std::int64_t>(backend->connect_timeout_seconds) * 1000));
 
         curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, error_buffer);
         curl_easy_setopt(curl, CURLOPT_URL, request_url.c_str());
@@ -781,8 +837,8 @@ CloudCompletionResult CloudClient::complete_impl(
         curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, connect_timeout_ms);
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
         curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, config_.verify_tls ? 1L : 0L);
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, config_.verify_tls ? 2L : 0L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, backend->verify_tls ? 1L : 0L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, backend->verify_tls ? 2L : 0L);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_callback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &stream_state);
 
@@ -856,7 +912,7 @@ CloudCompletionResult CloudClient::complete_impl(
 
         const auto sleep_duration = std::chrono::milliseconds(std::min<std::int64_t>(
             sleep_remaining_ms,
-            static_cast<std::int64_t>(config_.retry_backoff_ms)));
+            static_cast<std::int64_t>(backend->retry_backoff_ms)));
         if (sleep_duration.count() > 0) {
             std::this_thread::sleep_for(sleep_duration);
         }

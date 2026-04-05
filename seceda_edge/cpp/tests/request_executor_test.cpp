@@ -22,12 +22,24 @@ public:
     LocalModelInfo info() const override {
         LocalModelInfo info;
         info.ready = ready_;
+        info.engine_id = engine_id_;
+        info.backend_id = backend_id_;
+        info.model_id = model_id_;
+        info.model_alias = model_alias_;
+        info.execution_mode = execution_mode_;
+        info.capabilities = capabilities_;
         info.model_path = model_path_;
         return info;
     }
     LocalCompletionResult generate(const InferenceRequest &) override { return result_; }
 
     bool ready_ = true;
+    std::string engine_id_ = "local/test";
+    std::string backend_id_ = "local";
+    std::string model_id_ = "local-model";
+    std::string model_alias_ = "local/default";
+    std::string execution_mode_ = "in_process";
+    std::vector<std::string> capabilities_;
     std::string model_path_ = "fake.gguf";
     LocalCompletionResult result_;
 };
@@ -126,6 +138,38 @@ int main() {
     if (!require(
             forced_local_response.error_kind == InferenceErrorKind::kLocalUnavailable,
             "forced local should report local_unavailable")) {
+        return 1;
+    }
+
+    request.seceda.route_override = RouteTarget::kAuto;
+    local.ready_ = true;
+    local.capabilities_ = {"chat.completions", "text", "stream", "tools", "response_format"};
+    local.result_.ok = true;
+    local.result_.text = "local tool answer";
+    local.result_.message.role = "assistant";
+    local.result_.message.content = "local tool answer";
+    cloud.configured_ = true;
+    cloud.result_.ok = true;
+    cloud.result_.text = "cloud tool answer";
+    router.decision_.target = RouteTarget::kLocal;
+    router.decision_.reason = "local_default";
+
+    InferenceRequest tool_request;
+    tool_request.messages.push_back({"user", "call a tool", {}, {}, {}});
+    tool_request.capabilities.has_tools = true;
+    tool_request.capabilities.requests_tool_choice = true;
+    tool_request.advanced.tools_json =
+        R"([{"type":"function","function":{"name":"lookup","description":"Lookup","parameters":{"type":"object"}}}])";
+    tool_request.advanced.tool_choice_json = R"({"type":"function","function":{"name":"lookup"}})";
+    refresh_request_views(tool_request);
+
+    auto local_tool_response = executor.execute(tool_request);
+    if (!require(local_tool_response.ok, "local runtime with tool capability should satisfy tool requests")) {
+        return 1;
+    }
+    if (!require(
+            local_tool_response.final_target == RouteTarget::kLocal,
+            "tool-capable local runtime should stay on local")) {
         return 1;
     }
 
