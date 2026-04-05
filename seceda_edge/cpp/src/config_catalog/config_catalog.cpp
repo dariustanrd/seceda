@@ -1,17 +1,19 @@
 #include "config_catalog/config_catalog.hpp"
 
+#include "config_catalog/simple_toml_read.hpp"
 #include "config_catalog/simple_toml.hpp"
+#include "file_utils/read_text_file.hpp"
 
 #include <cstdlib>
 #include <filesystem>
-#include <fstream>
 #include <set>
-#include <sstream>
 
 namespace seceda::edge {
 namespace {
 
 using simple_toml::Value;
+namespace fs_utils = seceda::edge::file_utils;
+namespace toml_read = seceda::edge::simple_toml_read;
 
 constexpr const char * kDefaultRuntimeConfigRelativePath = "seceda_edge/config/seceda.toml";
 constexpr const char * kDefaultRuntimeConfigCatalogRelativePath =
@@ -89,92 +91,6 @@ bool search_upward_for_file(
     return false;
 }
 
-bool read_file(const std::string & path, std::string & content, std::string & error) {
-    std::ifstream in(path);
-    if (!in) {
-        error = "Unable to open file: " + path;
-        return false;
-    }
-
-    std::ostringstream buffer;
-    buffer << in.rdbuf();
-    content = buffer.str();
-    return true;
-}
-
-bool read_required_string(
-    const Value & table,
-    const char * key,
-    std::string & out,
-    std::string & error) {
-    const Value * const value = simple_toml::table_get(table, key);
-    if (value == nullptr || !value->is_string()) {
-        error = std::string("Missing or invalid string field: ") + key;
-        return false;
-    }
-    out = value->string_value;
-    return true;
-}
-
-bool read_optional_string(
-    const Value & table,
-    const char * key,
-    std::string & out,
-    std::string & error) {
-    const Value * const value = simple_toml::table_get(table, key);
-    if (value == nullptr) {
-        return true;
-    }
-    if (!value->is_string()) {
-        error = std::string("Invalid string field: ") + key;
-        return false;
-    }
-    out = value->string_value;
-    return true;
-}
-
-bool read_optional_bool(
-    const Value & table,
-    const char * key,
-    bool & out,
-    std::string & error) {
-    const Value * const value = simple_toml::table_get(table, key);
-    if (value == nullptr) {
-        return true;
-    }
-    if (!value->is_boolean()) {
-        error = std::string("Invalid boolean field: ") + key;
-        return false;
-    }
-    out = value->boolean_value;
-    return true;
-}
-
-bool read_optional_string_array(
-    const Value & table,
-    const char * key,
-    std::vector<std::string> & out,
-    std::string & error) {
-    const Value * const value = simple_toml::table_get(table, key);
-    if (value == nullptr) {
-        return true;
-    }
-    if (!value->is_array()) {
-        error = std::string("Invalid array field: ") + key;
-        return false;
-    }
-
-    out.clear();
-    for (const auto & item : value->array_items) {
-        if (!item.is_string()) {
-            error = std::string("Array field '") + key + "' must contain only strings";
-            return false;
-        }
-        out.push_back(item.string_value);
-    }
-    return true;
-}
-
 bool parse_value_kind(const std::string & raw, ConfigValueKind & out) {
     if (raw == "string") {
         out = ConfigValueKind::kString;
@@ -244,7 +160,7 @@ bool load_runtime_config_catalog(
     }
 
     std::string content;
-    if (!read_file(catalog_path, content, error)) {
+    if (!fs_utils::read_text_file(catalog_path, content, error)) {
         return false;
     }
 
@@ -268,11 +184,11 @@ bool load_runtime_config_catalog(
 
         ConfigCatalogEntry entry;
         std::string raw_kind;
-        if (!read_required_string(item, "key", entry.key, error) ||
-            !read_required_string(item, "group", entry.group, error) ||
-            !read_required_string(item, "label", entry.label, error) ||
-            !read_required_string(item, "description", entry.description, error) ||
-            !read_required_string(item, "type", raw_kind, error)) {
+        if (!toml_read::read_required_string(item, "key", entry.key, error) ||
+            !toml_read::read_required_string(item, "group", entry.group, error) ||
+            !toml_read::read_required_string(item, "label", entry.label, error) ||
+            !toml_read::read_required_string(item, "description", entry.description, error) ||
+            !toml_read::read_required_string(item, "type", raw_kind, error)) {
             return false;
         }
         if (!parse_value_kind(raw_kind, entry.value_kind)) {
@@ -280,22 +196,22 @@ bool load_runtime_config_catalog(
             return false;
         }
 
-        if (!read_optional_string(item, "cli_flag", entry.sources.cli_flag, error) ||
-            !read_optional_string(item, "cli_value_name", entry.cli_value_name, error) ||
-            !read_optional_string(item, "env_var", entry.sources.env_var, error) ||
-            !read_optional_string(item, "config_path", entry.sources.config_key, error) ||
-            !read_optional_string(item, "tui_field_id", entry.sources.tui_field_id, error) ||
-            !read_optional_string(item, "default", entry.default_value, error) ||
-            !read_optional_string(item, "units", entry.units, error) ||
-            !read_optional_string(item, "min", entry.min_value, error) ||
-            !read_optional_string(item, "max", entry.max_value, error) ||
-            !read_optional_string_array(item, "enum_values", entry.enum_values, error) ||
-            !read_optional_bool(item, "sensitive", entry.sensitive, error) ||
-            !read_optional_bool(item, "hot_reloadable", entry.hot_reloadable, error) ||
-            !read_optional_bool(item, "requires_restart", entry.requires_restart, error) ||
-            !read_optional_bool(item, "advanced", entry.advanced, error) ||
-            !read_optional_bool(item, "experimental", entry.experimental, error) ||
-            !read_optional_bool(item, "deprecated", entry.deprecated, error)) {
+        if (!toml_read::read_optional_string(item, "cli_flag", entry.sources.cli_flag, error) ||
+            !toml_read::read_optional_string(item, "cli_value_name", entry.cli_value_name, error) ||
+            !toml_read::read_optional_string(item, "env_var", entry.sources.env_var, error) ||
+            !toml_read::read_optional_string(item, "config_path", entry.sources.config_key, error) ||
+            !toml_read::read_optional_string(item, "tui_field_id", entry.sources.tui_field_id, error) ||
+            !toml_read::read_optional_string(item, "default", entry.default_value, error) ||
+            !toml_read::read_optional_string(item, "units", entry.units, error) ||
+            !toml_read::read_optional_string(item, "min", entry.min_value, error) ||
+            !toml_read::read_optional_string(item, "max", entry.max_value, error) ||
+            !toml_read::read_optional_string_array(item, "enum_values", entry.enum_values, error) ||
+            !toml_read::read_optional_bool(item, "sensitive", entry.sensitive, error) ||
+            !toml_read::read_optional_bool(item, "hot_reloadable", entry.hot_reloadable, error) ||
+            !toml_read::read_optional_bool(item, "requires_restart", entry.requires_restart, error) ||
+            !toml_read::read_optional_bool(item, "advanced", entry.advanced, error) ||
+            !toml_read::read_optional_bool(item, "experimental", entry.experimental, error) ||
+            !toml_read::read_optional_bool(item, "deprecated", entry.deprecated, error)) {
             return false;
         }
 

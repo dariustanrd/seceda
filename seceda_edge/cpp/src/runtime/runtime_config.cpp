@@ -1,11 +1,14 @@
 #include "runtime/runtime_config.hpp"
 
 #include "config_catalog/config_catalog.hpp"
+#include "config_catalog/simple_toml_read.hpp"
 #include "config_catalog/simple_toml.hpp"
+#include "file_utils/read_text_file.hpp"
+#include "local_models/local_execution_modes.hpp"
+#include "text_utils/normalize.hpp"
 
 #include <cstdlib>
 #include <filesystem>
-#include <fstream>
 #include <set>
 #include <sstream>
 #include <type_traits>
@@ -16,6 +19,9 @@ namespace seceda::edge {
 namespace {
 
 using simple_toml::Value;
+namespace fs_utils = seceda::edge::file_utils;
+namespace text = seceda::edge::text_utils;
+namespace toml_read = seceda::edge::simple_toml_read;
 
 struct ConfigFileSelection {
     std::string path;
@@ -23,23 +29,13 @@ struct ConfigFileSelection {
     bool disable = false;
 };
 
-std::string trim(const std::string & value) {
-    const auto start = value.find_first_not_of(" \t\r\n");
-    if (start == std::string::npos) {
-        return "";
-    }
-
-    const auto end = value.find_last_not_of(" \t\r\n");
-    return value.substr(start, end - start + 1);
-}
-
 std::vector<std::string> split_on(const std::string & value, char delimiter) {
     std::vector<std::string> out;
     std::stringstream stream(value);
     std::string item;
 
     while (std::getline(stream, item, delimiter)) {
-        item = trim(item);
+        item = text::trim_copy(item);
         if (!item.empty()) {
             out.push_back(item);
         }
@@ -63,11 +59,6 @@ bool parse_bool(const std::string & value, bool & out) {
     }
 
     return false;
-}
-
-bool is_sidecar_execution_mode(const std::string & raw_mode) {
-    const std::string trimmed = trim(raw_mode);
-    return trimmed == "sidecar_server" || trimmed == "sidecar-server" || trimmed == "sidecar";
 }
 
 bool next_value(
@@ -132,22 +123,9 @@ bool parse_bool_flag(
     return false;
 }
 
-bool read_file(const std::string & path, std::string & content, std::string & error) {
-    std::ifstream in(path);
-    if (!in) {
-        error = "Unable to open file: " + path;
-        return false;
-    }
-
-    std::ostringstream buffer;
-    buffer << in.rdbuf();
-    content = buffer.str();
-    return true;
-}
-
 bool load_toml_file(const std::string & path, Value & root, std::string & error) {
     std::string content;
-    if (!read_file(path, content, error)) {
+    if (!fs_utils::read_text_file(path, content, error)) {
         return false;
     }
 
@@ -173,119 +151,6 @@ bool validate_allowed_keys(
     return true;
 }
 
-bool read_optional_string(
-    const Value & table,
-    const char * key,
-    std::string & out,
-    std::string & error) {
-    const Value * const value = simple_toml::table_get(table, key);
-    if (value == nullptr) {
-        return true;
-    }
-    if (!value->is_string()) {
-        error = std::string("Expected string for key: ") + key;
-        return false;
-    }
-    out = value->string_value;
-    return true;
-}
-
-bool read_required_string(
-    const Value & table,
-    const char * key,
-    std::string & out,
-    std::string & error) {
-    if (!read_optional_string(table, key, out, error)) {
-        return false;
-    }
-    if (out.empty()) {
-        error = std::string("Missing required string key: ") + key;
-        return false;
-    }
-    return true;
-}
-
-template <typename T>
-bool read_optional_integer(
-    const Value & table,
-    const char * key,
-    T & out,
-    std::string & error) {
-    const Value * const value = simple_toml::table_get(table, key);
-    if (value == nullptr) {
-        return true;
-    }
-    if (!value->is_integer()) {
-        error = std::string("Expected integer for key: ") + key;
-        return false;
-    }
-    out = static_cast<T>(value->integer_value);
-    return true;
-}
-
-bool read_optional_float_value(
-    const Value & table,
-    const char * key,
-    float & out,
-    std::string & error) {
-    const Value * const value = simple_toml::table_get(table, key);
-    if (value == nullptr) {
-        return true;
-    }
-    if (value->is_integer()) {
-        out = static_cast<float>(value->integer_value);
-        return true;
-    }
-    if (value->is_float()) {
-        out = static_cast<float>(value->float_value);
-        return true;
-    }
-    error = std::string("Expected number for key: ") + key;
-    return false;
-}
-
-bool read_optional_bool_value(
-    const Value & table,
-    const char * key,
-    bool & out,
-    std::string & error) {
-    const Value * const value = simple_toml::table_get(table, key);
-    if (value == nullptr) {
-        return true;
-    }
-    if (!value->is_boolean()) {
-        error = std::string("Expected boolean for key: ") + key;
-        return false;
-    }
-    out = value->boolean_value;
-    return true;
-}
-
-bool read_optional_string_array(
-    const Value & table,
-    const char * key,
-    std::vector<std::string> & out,
-    std::string & error) {
-    const Value * const value = simple_toml::table_get(table, key);
-    if (value == nullptr) {
-        return true;
-    }
-    if (!value->is_array()) {
-        error = std::string("Expected array for key: ") + key;
-        return false;
-    }
-
-    out.clear();
-    for (const auto & item : value->array_items) {
-        if (!item.is_string()) {
-            error = std::string("Expected string array for key: ") + key;
-            return false;
-        }
-        out.push_back(item.string_value);
-    }
-    return true;
-}
-
 bool parse_key_value_spec(
     const std::string & raw,
     std::vector<std::pair<std::string, std::string>> & items,
@@ -298,8 +163,8 @@ bool parse_key_value_spec(
             return false;
         }
 
-        const std::string key = trim(token.substr(0, equal_pos));
-        const std::string value = trim(token.substr(equal_pos + 1));
+        const std::string key = text::trim_copy(token.substr(0, equal_pos));
+        const std::string value = text::trim_copy(token.substr(equal_pos + 1));
         if (key.empty() || value.empty()) {
             error = "Invalid catalog spec token '" + token + "'";
             return false;
@@ -538,31 +403,31 @@ bool parse_local_engine_table(
     }
 
     LocalModelConfig config;
-    if (!read_optional_string(table, "engine_id", config.engine_id, error) ||
-        !read_optional_string(table, "backend_id", config.backend_id, error) ||
-        !read_optional_string(table, "model_id", config.model_id, error) ||
-        !read_optional_string(table, "model_alias", config.model_alias, error) ||
-        !read_optional_string(table, "display_name", config.display_name, error) ||
-        !read_optional_string(table, "execution_mode", config.execution_mode, error) ||
-        !read_optional_string(table, "model_path", config.model_path, error) ||
-        !read_optional_string(table, "sidecar_base_url", config.sidecar_base_url, error) ||
-        !read_optional_integer(table, "context_size", config.context_size, error) ||
-        !read_optional_integer(table, "batch_size", config.batch_size, error) ||
-        !read_optional_integer(table, "n_gpu_layers", config.n_gpu_layers, error) ||
-        !read_optional_integer(table, "n_threads", config.n_threads, error) ||
-        !read_optional_integer(table, "n_threads_batch", config.n_threads_batch, error) ||
-        !read_optional_integer(
+    if (!toml_read::read_optional_string(table, "engine_id", config.engine_id, error) ||
+        !toml_read::read_optional_string(table, "backend_id", config.backend_id, error) ||
+        !toml_read::read_optional_string(table, "model_id", config.model_id, error) ||
+        !toml_read::read_optional_string(table, "model_alias", config.model_alias, error) ||
+        !toml_read::read_optional_string(table, "display_name", config.display_name, error) ||
+        !toml_read::read_optional_string(table, "execution_mode", config.execution_mode, error) ||
+        !toml_read::read_optional_string(table, "model_path", config.model_path, error) ||
+        !toml_read::read_optional_string(table, "sidecar_base_url", config.sidecar_base_url, error) ||
+        !toml_read::read_optional_integer(table, "context_size", config.context_size, error) ||
+        !toml_read::read_optional_integer(table, "batch_size", config.batch_size, error) ||
+        !toml_read::read_optional_integer(table, "n_gpu_layers", config.n_gpu_layers, error) ||
+        !toml_read::read_optional_integer(table, "n_threads", config.n_threads, error) ||
+        !toml_read::read_optional_integer(table, "n_threads_batch", config.n_threads_batch, error) ||
+        !toml_read::read_optional_integer(
             table,
             "sidecar_timeout_seconds",
             config.sidecar_timeout_seconds,
             error) ||
-        !read_optional_integer(
+        !toml_read::read_optional_integer(
             table,
             "sidecar_connect_timeout_seconds",
             config.sidecar_connect_timeout_seconds,
             error) ||
-        !read_optional_bool_value(table, "sidecar_verify_tls", config.sidecar_verify_tls, error) ||
-        !read_optional_string_array(table, "capabilities", config.capabilities, error)) {
+        !toml_read::read_optional_bool(table, "sidecar_verify_tls", config.sidecar_verify_tls, error) ||
+        !toml_read::read_optional_string_array(table, "capabilities", config.capabilities, error)) {
         return false;
     }
 
@@ -603,28 +468,28 @@ bool parse_remote_backend_table(
     }
 
     CloudConfig config;
-    if (!read_optional_string(table, "backend_id", config.backend_id, error) ||
-        !read_optional_string(table, "model", config.model, error) ||
-        !read_optional_string(table, "model_alias", config.model_alias, error) ||
-        !read_optional_string(table, "display_name", config.display_name, error) ||
-        !read_optional_string(table, "execution_mode", config.execution_mode, error) ||
-        !read_optional_string(table, "base_url", config.base_url, error) ||
-        !read_optional_string(table, "api_key", config.api_key, error) ||
-        !read_optional_integer(table, "timeout_seconds", config.timeout_seconds, error) ||
-        !read_optional_integer(
+    if (!toml_read::read_optional_string(table, "backend_id", config.backend_id, error) ||
+        !toml_read::read_optional_string(table, "model", config.model, error) ||
+        !toml_read::read_optional_string(table, "model_alias", config.model_alias, error) ||
+        !toml_read::read_optional_string(table, "display_name", config.display_name, error) ||
+        !toml_read::read_optional_string(table, "execution_mode", config.execution_mode, error) ||
+        !toml_read::read_optional_string(table, "base_url", config.base_url, error) ||
+        !toml_read::read_optional_string(table, "api_key", config.api_key, error) ||
+        !toml_read::read_optional_integer(table, "timeout_seconds", config.timeout_seconds, error) ||
+        !toml_read::read_optional_integer(
             table,
             "connect_timeout_seconds",
             config.connect_timeout_seconds,
             error) ||
-        !read_optional_integer(table, "retry_attempts", config.retry_attempts, error) ||
-        !read_optional_integer(table, "retry_backoff_ms", config.retry_backoff_ms, error) ||
-        !read_optional_bool_value(
+        !toml_read::read_optional_integer(table, "retry_attempts", config.retry_attempts, error) ||
+        !toml_read::read_optional_integer(table, "retry_backoff_ms", config.retry_backoff_ms, error) ||
+        !toml_read::read_optional_bool(
             table,
             "send_modal_session_id",
             config.send_modal_session_id,
             error) ||
-        !read_optional_bool_value(table, "verify_tls", config.verify_tls, error) ||
-        !read_optional_string_array(table, "capabilities", config.capabilities, error)) {
+        !toml_read::read_optional_bool(table, "verify_tls", config.verify_tls, error) ||
+        !toml_read::read_optional_string_array(table, "capabilities", config.capabilities, error)) {
         return false;
     }
 
@@ -661,16 +526,16 @@ bool parse_exposed_model_table(
 
     ModelCatalogEntry entry;
     std::string route_target;
-    if (!read_required_string(table, "id", entry.id, error) ||
-        !read_optional_string(table, "display_name", entry.display_name, error) ||
-        !read_optional_string(table, "owned_by", entry.owned_by, error) ||
-        !read_optional_string(table, "engine_id", entry.engine_id, error) ||
-        !read_optional_string(table, "backend_id", entry.backend_id, error) ||
-        !read_optional_string(table, "model_id", entry.model_id, error) ||
-        !read_optional_string(table, "model_alias", entry.model_alias, error) ||
-        !read_optional_string(table, "execution_mode", entry.execution_mode, error) ||
-        !read_optional_string(table, "route_target", route_target, error) ||
-        !read_optional_string_array(table, "capabilities", entry.capabilities, error)) {
+    if (!toml_read::read_required_string(table, "id", entry.id, error) ||
+        !toml_read::read_optional_string(table, "display_name", entry.display_name, error) ||
+        !toml_read::read_optional_string(table, "owned_by", entry.owned_by, error) ||
+        !toml_read::read_optional_string(table, "engine_id", entry.engine_id, error) ||
+        !toml_read::read_optional_string(table, "backend_id", entry.backend_id, error) ||
+        !toml_read::read_optional_string(table, "model_id", entry.model_id, error) ||
+        !toml_read::read_optional_string(table, "model_alias", entry.model_alias, error) ||
+        !toml_read::read_optional_string(table, "execution_mode", entry.execution_mode, error) ||
+        !toml_read::read_optional_string(table, "route_target", route_target, error) ||
+        !toml_read::read_optional_string_array(table, "capabilities", entry.capabilities, error)) {
         return false;
     }
 
@@ -789,15 +654,15 @@ bool apply_daemon_table(const Value & table, DaemonConfig & config, std::string 
         return false;
     }
 
-    return read_optional_string(table, "host", config.host, error) &&
-        read_optional_integer(table, "port", config.port, error) &&
-        read_optional_string(table, "public_model_alias", config.public_model_alias, error) &&
-        read_optional_string(
+    return toml_read::read_optional_string(table, "host", config.host, error) &&
+        toml_read::read_optional_integer(table, "port", config.port, error) &&
+        toml_read::read_optional_string(table, "public_model_alias", config.public_model_alias, error) &&
+        toml_read::read_optional_string(
             table,
             "default_system_prompt",
             config.default_system_prompt,
             error) &&
-        read_optional_string(table, "warmup_prompt", config.warmup_prompt, error);
+        toml_read::read_optional_string(table, "warmup_prompt", config.warmup_prompt, error);
 }
 
 bool apply_generation_table(const Value & table, DaemonConfig & config, std::string & error) {
@@ -816,20 +681,20 @@ bool apply_generation_table(const Value & table, DaemonConfig & config, std::str
         return false;
     }
 
-    return read_optional_integer(
+    return toml_read::read_optional_integer(
                table,
                "max_completion_tokens",
                config.default_generation.max_completion_tokens,
                error) &&
-        read_optional_float_value(
+        toml_read::read_optional_float(
                table,
                "temperature",
                config.default_generation.temperature,
                error) &&
-        read_optional_float_value(table, "top_p", config.default_generation.top_p, error) &&
-        read_optional_integer(table, "top_k", config.default_generation.top_k, error) &&
-        read_optional_float_value(table, "min_p", config.default_generation.min_p, error) &&
-        read_optional_integer(table, "seed", config.default_generation.seed, error);
+        toml_read::read_optional_float(table, "top_p", config.default_generation.top_p, error) &&
+        toml_read::read_optional_integer(table, "top_k", config.default_generation.top_k, error) &&
+        toml_read::read_optional_float(table, "min_p", config.default_generation.min_p, error) &&
+        toml_read::read_optional_integer(table, "seed", config.default_generation.seed, error);
 }
 
 bool apply_router_table(const Value & table, DaemonConfig & config, std::string & error) {
@@ -847,23 +712,27 @@ bool apply_router_table(const Value & table, DaemonConfig & config, std::string 
         return false;
     }
 
-    return read_optional_integer(
+    return toml_read::read_optional_integer(
                table,
                "max_prompt_chars",
                config.router.max_prompt_chars,
                error) &&
-        read_optional_integer(
+        toml_read::read_optional_integer(
                table,
                "max_estimated_tokens",
                config.router.max_estimated_tokens,
                error) &&
-        read_optional_string_array(
+        toml_read::read_optional_string_array(
                table,
                "structured_keywords",
                config.router.structured_keywords,
                error) &&
-        read_optional_string_array(table, "cloud_keywords", config.router.cloud_keywords, error) &&
-        read_optional_string_array(
+        toml_read::read_optional_string_array(
+               table,
+               "cloud_keywords",
+               config.router.cloud_keywords,
+               error) &&
+        toml_read::read_optional_string_array(
                table,
                "freshness_keywords",
                config.router.freshness_keywords,
@@ -875,7 +744,7 @@ bool apply_observability_table(const Value & table, DaemonConfig & config, std::
         return false;
     }
 
-    return read_optional_integer(table, "event_log_capacity", config.event_log_capacity, error);
+    return toml_read::read_optional_integer(table, "event_log_capacity", config.event_log_capacity, error);
 }
 
 bool apply_local_table(const Value & table, DaemonConfig & config, std::string & error) {
@@ -884,7 +753,7 @@ bool apply_local_table(const Value & table, DaemonConfig & config, std::string &
     }
 
     std::string active_engine;
-    if (!read_optional_string(table, "active_engine", active_engine, error)) {
+    if (!toml_read::read_optional_string(table, "active_engine", active_engine, error)) {
         return false;
     }
 
@@ -945,7 +814,7 @@ bool apply_remote_table(const Value & table, DaemonConfig & config, std::string 
     }
 
     std::string default_backend;
-    if (!read_optional_string(table, "default_backend", default_backend, error)) {
+    if (!toml_read::read_optional_string(table, "default_backend", default_backend, error)) {
         return false;
     }
 
@@ -1049,7 +918,7 @@ bool apply_config_file(const std::string & path, DaemonConfig & config, std::str
     }
 
     std::int64_t schema_version = 1;
-    if (!read_optional_integer(root, "schema_version", schema_version, error)) {
+    if (!toml_read::read_optional_integer(root, "schema_version", schema_version, error)) {
         return false;
     }
     if (schema_version != 1) {
@@ -1280,7 +1149,7 @@ bool RuntimeConfigParser::parse(
             if (!next_value(argc, argv, i, arg, value, error)) {
                 return false;
             }
-            const std::string trimmed = trim(value);
+            const std::string trimmed = text::trim_copy(value);
             config.local.execution_mode = trimmed.empty() ? std::string{"in_process"} : trimmed;
         } else if (arg.rfind("--local-sidecar-base-url", 0) == 0) {
             std::string value;

@@ -1,25 +1,15 @@
 #include "local_models/local_engine_resolve.hpp"
 
 #include "local_models/local_execution_modes.hpp"
+#include "text_utils/normalize.hpp"
 
-#include <algorithm>
-#include <cctype>
 #include <optional>
 
 namespace seceda::edge {
 namespace {
 
-std::string to_lower_ascii_copy(std::string value) {
-    std::transform(
-        value.begin(),
-        value.end(),
-        value.begin(),
-        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-    return value;
-}
-
 bool icontains(const std::string & haystack, const char * needle_lower_ascii) {
-    return to_lower_ascii_copy(haystack).find(needle_lower_ascii) != std::string::npos;
+    return text_utils::to_lower_ascii_copy(haystack).find(needle_lower_ascii) != std::string::npos;
 }
 
 }  // namespace

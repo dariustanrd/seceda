@@ -1,7 +1,6 @@
 #include "router/heuristic_router.hpp"
+#include "text_utils/normalize.hpp"
 
-#include <algorithm>
-#include <cctype>
 #include <cmath>
 #include <sstream>
 
@@ -16,7 +15,7 @@ RouteDecision HeuristicRouter::decide(const InferenceRequest & request) const {
     decision.resolved_backend_id = request.seceda.preferred_backend_id;
     decision.resolved_model_alias = request.seceda.preferred_model_alias;
 
-    const std::string lowered = to_lower_ascii(request.normalized.routing_prompt);
+    const std::string lowered = text_utils::to_lower_ascii_copy(request.normalized.routing_prompt);
     decision.estimated_tokens = estimate_token_count(lowered);
 
     if (request.capabilities.requires_remote_backend) {
@@ -74,15 +73,6 @@ RouterConfig HeuristicRouter::config() const {
     return config_;
 }
 
-std::string HeuristicRouter::to_lower_ascii(std::string value) {
-    std::transform(
-        value.begin(),
-        value.end(),
-        value.begin(),
-        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-    return value;
-}
-
 bool HeuristicRouter::contains_any(
     const std::string & haystack,
     const std::vector<std::string> & needles,
@@ -91,7 +81,7 @@ bool HeuristicRouter::contains_any(
         if (needle.empty()) {
             continue;
         }
-        if (haystack.find(to_lower_ascii(needle)) != std::string::npos) {
+        if (haystack.find(text_utils::to_lower_ascii_copy(needle)) != std::string::npos) {
             matched.push_back(needle);
         }
     }

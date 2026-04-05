@@ -1,14 +1,10 @@
 #include "runtime/edge_daemon.hpp"
+#include "local_models/local_execution_modes.hpp"
 
 #include <utility>
 
 namespace seceda::edge {
 namespace {
-
-bool is_sidecar_execution_mode(const std::string & raw_mode) {
-    return raw_mode == "sidecar_server" || raw_mode == "sidecar-server" || raw_mode == "sidecar";
-}
-
 bool has_local_runtime_configuration(const LocalModelConfig & config) {
     if (is_sidecar_execution_mode(config.execution_mode)) {
         return !config.sidecar_base_url.empty();
