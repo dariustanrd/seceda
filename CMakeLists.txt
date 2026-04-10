@@ -11,10 +11,12 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+include(CTest)
+
 # Top-level build selection
 option(SECEDA_BUILD_LLAMA_CPP "Build llama.cpp" ON)
 option(SECEDA_BUILD_EXECUTORCH "Build ExecuTorch" ON)
-option(SECEDA_BUILD_CUSTOM "Build custom code in src/" ON)
+option(SECEDA_BUILD_CUSTOM "Build first-party edge C++ code in seceda_edge/cpp" ON)
 
 # Backend options shared across downstream components
 option(SECEDA_ENABLE_VULKAN "Enable Vulkan backends where available" OFF)
@@ -89,7 +91,20 @@ if(SECEDA_ENABLE_VULKAN)
 endif()
 
 if(SECEDA_BUILD_EXECUTORCH)
-    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    # Prefer the same interpreter as the uv workspace (.venv) so ExecuTorch CMake
+    # finds torch headers. Override with -DPython3_EXECUTABLE=... or SECEDA_PYTHON.
+    if(NOT Python3_EXECUTABLE)
+        if(DEFINED ENV{SECEDA_PYTHON} AND EXISTS "$ENV{SECEDA_PYTHON}")
+            set(Python3_EXECUTABLE "$ENV{SECEDA_PYTHON}")
+        elseif(EXISTS "${SECEDA_ROOT_DIR}/.venv/bin/python3")
+            set(Python3_EXECUTABLE "${SECEDA_ROOT_DIR}/.venv/bin/python3")
+        elseif(EXISTS "${SECEDA_ROOT_DIR}/.venv/bin/python")
+            set(Python3_EXECUTABLE "${SECEDA_ROOT_DIR}/.venv/bin/python")
+        endif()
+    endif()
+
+    find_package(Python3 3.11 COMPONENTS Interpreter REQUIRED)
+
     message(STATUS "Python interpreter: ${Python3_EXECUTABLE}")
 endif()
 
@@ -274,12 +289,12 @@ if(SECEDA_BUILD_EXECUTORCH)
 endif()
 
 if(SECEDA_BUILD_CUSTOM)
-    if(EXISTS ${SECEDA_ROOT_DIR}/src/CMakeLists.txt)
+    if(EXISTS "${SECEDA_ROOT_DIR}/seceda_edge/cpp/CMakeLists.txt")
         message(STATUS "")
-        message(STATUS "=== Configuring custom code ===")
-        add_subdirectory(src)
+        message(STATUS "=== Configuring edge C++ code ===")
+        add_subdirectory(seceda_edge/cpp)
     else()
-        message(STATUS "No src/CMakeLists.txt found - skipping custom code build")
+        message(STATUS "No seceda_edge/cpp/CMakeLists.txt found - skipping edge C++ build")
     endif()
 endif()
 
@@ -291,7 +306,7 @@ message(STATUS "")
 message(STATUS "Components:")
 message(STATUS "  llama.cpp: ${SECEDA_BUILD_LLAMA_CPP}")
 message(STATUS "  ExecuTorch: ${SECEDA_BUILD_EXECUTORCH}")
-message(STATUS "  Custom code: ${SECEDA_BUILD_CUSTOM}")
+message(STATUS "  Edge C++ code: ${SECEDA_BUILD_CUSTOM}")
 message(STATUS "")
 message(STATUS "Backends:")
 message(STATUS "  Vulkan: ${SECEDA_ENABLE_VULKAN}")

@@ -156,13 +156,34 @@ The repository now includes a top-level CMake build that can orchestrate:
 
 * `thirdparty/llama.cpp`
 * `thirdparty/executorch`
-* future custom C++ targets under `src/`
+* first-party edge C++ targets under `seceda_edge/cpp/`
 
 Initialize submodules before configuring:
 
 ```bash
 git submodule update --init --recursive
 ```
+
+### ExecuTorch and Python (uv)
+
+ExecuTorch’s C++ configure step expects a **Python 3.11+** interpreter that can `import torch` (used to locate PyTorch headers when optimized kernels are enabled). That matches the workspace packages (`requires-python = ">=3.11"`).
+
+CMake picks an interpreter in this order:
+
+1. `-DPython3_EXECUTABLE=...` on the configure line (e.g. from `scripts/build.sh --python`)
+2. Environment variable `SECEDA_PYTHON`
+3. `./.venv/bin/python3` (or `python`) when present
+4. Otherwise CMake’s default search (may select an older system Python on macOS)
+
+Recommended: use the repo virtualenv and install torch there:
+
+```bash
+uv sync --group executorch-build
+```
+
+Then configure as usual, or use `scripts/build.sh`, which applies the same preference order for preflight checks.
+
+If `uv lock` or `uv sync` fails with **dns error** / **failed to lookup address information** when fetching `torch` from `files.pythonhosted.org`, the issue is network reachability to PyPI (offline machine, broken DNS, VPN, or corporate proxy), not the repo layout. Fix DNS/connectivity, or run `uv sync --group executorch-build` on a network you trust and commit the updated `uv.lock`. As a last resort, install PyTorch into the same interpreter CMake uses (e.g. `.venv`) with `pip install torch` and point CMake at that Python via `--python` or `SECEDA_PYTHON`.
 
 ### Native builds
 
@@ -201,7 +222,7 @@ That backend is still considered experimental, so prefer `apple-silicon-release`
 
 ### Generic ARM64 cross-compilation
 
-The ARM presets are generic Linux ARM64 presets, not Telechips/Yocto-specific ones.
+The ARM presets are generic Linux ARM64 presets.
 
 ```bash
 export ARM_GNU_TOOLCHAIN_ROOT=/opt/toolchains/aarch64-linux-gnu
@@ -226,7 +247,104 @@ If you use a Vulkan preset, make sure `glslc` is available on `PATH` or provide 
 
 ### Custom C++ targets
 
-`src/CMakeLists.txt` is set up as a reusable template. Add custom targets under `src/` and either:
+`seceda_edge/cpp/CMakeLists.txt` is the first-party native entrypoint. Add edge runtime code under `seceda_edge/cpp/` and either:
 
 * call `add_llama_runner(...)` for `llama.cpp`-based apps, or
 * call `add_executorch_runner(...)` for ExecuTorch-based apps.
+
+### Edge daemon to Modal SGLang
+
+The current edge daemon can call a deployed Modal-backed SGLang URL directly via
+the OpenAI-compatible `POST /v1/chat/completions` interface. The shared
+edge-to-cloud contract lives in `seceda_shared/README.md`.
+
+For quick local iteration on the edge daemon alone, it is often simpler to
+disable ExecuTorch and build the first-party C++ targets plus `llama.cpp`:
+
+```bash
+scripts/build.sh -p apple-silicon-release --cmake-arg -DSECEDA_BUILD_EXECUTORCH=OFF
+```
+
+Start the daemon with a local GGUF model and the deployed Modal flash URL:
+
+```bash
+export MODAL_FLASH_URL="https://<your-modal-url>"
+# Optional when the deployed endpoint is protected by bearer auth:
+export SECEDA_CLOUD_API_KEY="<token>"
+
+./build/apple-silicon-release/seceda_edge/cpp/apps/seceda_edge_daemon/seceda_edge_daemon \
+  --model-path ./models/LFM2-1.2B-GGUF/LFM2-1.2B-Q8_0.gguf \
+  --cloud-base-url "${MODAL_FLASH_URL}" \
+  --cloud-model seceda-cloud-default \
+  --cloud-connect-timeout-seconds 10 \
+  --cloud-timeout-seconds 120 \
+  --cloud-retry-attempts 2 \
+  --cloud-retry-backoff-ms 1000 \
+  --cloud-send-modal-session-id true
+```
+
+Single-turn smoke path:
+
+1. Verify the deployed Modal endpoint is up:
+
+```bash
+curl "${MODAL_FLASH_URL}/health"
+```
+
+2. Verify the edge daemon is up:
+
+```bash
+curl http://127.0.0.1:8080/health
+```
+
+3. Force one cloud-routed inference through the edge daemon:
+
+```bash
+curl http://127.0.0.1:8080/inference \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "Explain why request-scoped Modal session ids are useful.",
+    "route_override": "cloud",
+    "options": {
+      "max_tokens": 96
+    }
+  }'
+```
+
+4. Confirm the response shows `"ok": true`, `"final_target": "cloud"`, and a
+   non-empty `"text"` field.
+
+For the first milestone, the edge daemon generates a fresh `Modal-Session-ID`
+per logical inference request and reuses it only across retries for that same
+request. A future multi-turn upgrade will let callers supply a stable
+interaction-scoped session identifier.
+
+### Python Projects
+
+The repo-root `pyproject.toml` is a `uv` workspace entrypoint for two standalone
+Python projects:
+
+* `seceda_cloud/` for Modal and vLLM tooling
+* `seceda_edge/` for edge-side Python helpers
+
+Install both projects together from the repository root:
+
+```bash
+uv lock
+uv sync --all-packages
+```
+
+Run project-specific commands from the repository root:
+
+```bash
+uv run --package seceda-cloud modal run seceda_cloud/vllm_inference.py
+uv run --package seceda-edge python seceda_edge/test_client.py
+```
+
+Each project also works on its own for deployment or isolated development:
+
+```bash
+cd seceda_edge
+uv sync
+uv run python test_client.py
+```

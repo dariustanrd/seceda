@@ -143,3 +143,5 @@ coverage/
 
 *.csv
 *.jsonl
+
+.env

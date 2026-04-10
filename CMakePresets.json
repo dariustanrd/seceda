@@ -185,7 +185,7 @@
             "cacheVariables": {
                 "SECEDA_BUILD_LLAMA_CPP": "ON",
                 "SECEDA_BUILD_EXECUTORCH": "OFF",
-                "SECEDA_BUILD_CUSTOM": "OFF",
+                "SECEDA_BUILD_CUSTOM": "ON",
                 "SECEDA_ENABLE_VULKAN": "OFF",
                 "SECEDA_ENABLE_XNNPACK": "OFF",
                 "SECEDA_ENABLE_OPENMP": "ON",

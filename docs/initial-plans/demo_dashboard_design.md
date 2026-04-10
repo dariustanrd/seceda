@@ -53,3 +53,20 @@ Seceda hiking ridgeline with clouds just off the ridgeline, mountain in the back
     - “Send hard query” → intentionally triggers cloud call
     - “Turn off local SLM” → humans immediately call cloud god
     - “Load test mode” → lots of humans processing queries at once
+
+## Frameworks / Tools
+- PixiJS / Phaser
+- https://x.com/chongdashu/status/2014809078757818773
+- https://news.ycombinator.com/item?id=47034752
+- https://mordenstar.com/other/nb-sprites/
+- https://chatgpt.com/share/69b3ce3b-7068-800b-8b60-c2b8a70cbb11
+- https://chroma-dave.itch.io/pixelart-hiker
+- https://sscary.itch.io/the-adventurer-male
+- https://sscary.itch.io/the-adventurer-female
+- https://liberatedpixelcup.github.io/Universal-LPC-Spritesheet-Character-Generator/#sex=male&body=Body_Color_light&head=Human_Male_light&expression=Neutral_light&backpack=Backpack_blue&hair=Messy1_black&clothes=Shortsleeve_green&legs=Long_Pants_charcoal&backpack_straps=Straps_blue&shoes=Revised_Boots_black
+
+## Landing page
+- With a slide button to select simulated, or live, then a enter button below.
+- will show seceda logo, description of this project, links to code etc.
+- for simulated - it will be an interactive prerecorded version of the live demo, showing the intended functionality.
+- for live, it will be gated behind some simple password check to prevent abuse (potential upgrade to proper, but also simple auth - only I the dev will use this anyways.)

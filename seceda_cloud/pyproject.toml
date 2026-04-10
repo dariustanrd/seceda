@@ -1,0 +1,25 @@
+[project]
+name = "seceda-cloud"
+version = "0.1.0"
+description = "Cloud-side Modal and vLLM services for Seceda."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp",
+    "modal",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
