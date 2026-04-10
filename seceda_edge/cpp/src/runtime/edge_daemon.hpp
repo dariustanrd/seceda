@@ -18,12 +18,15 @@ public:
 
     bool initialize();
     InferenceResponse handle_inference(InferenceRequest request);
+    InferenceResponse handle_inference_stream(
+        InferenceRequest request,
+        const StreamDeltaCallback & on_delta);
     ModelReloadResult reload_model(const std::string & model_path, const std::string & warmup_prompt);
 
     HealthSnapshot health() const;
     InfoSnapshot info() const;
     std::string metrics_text() const;
-    EventBatch events(std::uint64_t since_id, std::size_t limit) const;
+    EventBatch events(std::uint64_t since_id, std::size_t limit, std::string request_id = {}) const;
 
 private:
     void update_state_locked(bool local_ready);

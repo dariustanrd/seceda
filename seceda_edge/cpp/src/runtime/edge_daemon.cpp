@@ -1,8 +1,19 @@
 #include "runtime/edge_daemon.hpp"
+#include "local_models/local_execution_modes.hpp"
 
 #include <utility>
 
 namespace seceda::edge {
+namespace {
+bool has_local_runtime_configuration(const LocalModelConfig & config) {
+    if (is_sidecar_execution_mode(config.execution_mode)) {
+        return !config.sidecar_base_url.empty();
+    }
+
+    return !config.model_path.empty();
+}
+
+}  // namespace
 
 EdgeDaemon::EdgeDaemon(
     DaemonConfig config,
@@ -26,7 +37,7 @@ bool EdgeDaemon::initialize() {
         last_error_.clear();
     }
 
-    if (!config_.local.model_path.empty()) {
+    if (has_local_runtime_configuration(config_.local)) {
         local_ready = local_runtime_->load(config_.local, config_.warmup_prompt, error);
     } else {
         error = "No local model configured";
@@ -42,12 +53,34 @@ bool EdgeDaemon::initialize() {
 }
 
 InferenceResponse EdgeDaemon::handle_inference(InferenceRequest request) {
-    if (request.system_prompt.empty()) {
+    {
         std::lock_guard<std::mutex> lock(mutex_);
-        request.system_prompt = config_.default_system_prompt;
+        if (request.model.empty()) {
+            request.model = config_.public_model_alias;
+        }
+        prepend_system_message(request, config_.default_system_prompt);
     }
 
     auto response = executor_.execute(request);
+    if (!response.ok) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        last_error_ = response.error;
+    }
+    return response;
+}
+
+InferenceResponse EdgeDaemon::handle_inference_stream(
+    InferenceRequest request,
+    const StreamDeltaCallback & on_delta) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (request.model.empty()) {
+            request.model = config_.public_model_alias;
+        }
+        prepend_system_message(request, config_.default_system_prompt);
+    }
+
+    auto response = executor_.execute_streaming(request, on_delta);
     if (!response.ok) {
         std::lock_guard<std::mutex> lock(mutex_);
         last_error_ = response.error;
@@ -120,9 +153,13 @@ InfoSnapshot EdgeDaemon::info() const {
     snapshot.host = config_.host;
     snapshot.port = config_.port;
     snapshot.default_system_prompt = config_.default_system_prompt;
+    snapshot.public_model_alias = config_.public_model_alias;
+    snapshot.exposed_models = config_.exposed_models;
     snapshot.router_config = router_->config();
     snapshot.local_model = local_runtime_->info();
     snapshot.cloud_client = cloud_client_->info();
+    snapshot.configured_local_engines = config_.local_engines;
+    snapshot.configured_remote_backends = config_.remote_backends;
     snapshot.last_error = last_error_;
     return snapshot;
 }
@@ -131,8 +168,8 @@ std::string EdgeDaemon::metrics_text() const {
     return metrics_.render_prometheus();
 }
 
-EventBatch EdgeDaemon::events(std::uint64_t since_id, std::size_t limit) const {
-    return metrics_.get_events(since_id, limit);
+EventBatch EdgeDaemon::events(std::uint64_t since_id, std::size_t limit, std::string request_id) const {
+    return metrics_.get_events(since_id, limit, std::move(request_id));
 }
 
 void EdgeDaemon::update_state_locked(bool local_ready) {

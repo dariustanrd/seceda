@@ -14,6 +14,9 @@ public:
         MetricsRegistry & metrics);
 
     InferenceResponse execute(const InferenceRequest & request);
+    InferenceResponse execute_streaming(
+        const InferenceRequest & request,
+        const StreamDeltaCallback & on_delta);
 
 private:
     InferenceResponse execute_local(
@@ -24,6 +27,18 @@ private:
         const InferenceRequest & request,
         InferenceResponse response,
         bool allow_local_best_effort);
+    InferenceResponse execute_local_streaming(
+        const InferenceRequest & request,
+        InferenceResponse response,
+        bool allow_cloud_fallback,
+        const StreamDeltaCallback & on_delta,
+        bool & stream_started);
+    InferenceResponse execute_cloud_streaming(
+        const InferenceRequest & request,
+        InferenceResponse response,
+        bool allow_local_best_effort,
+        const StreamDeltaCallback & on_delta,
+        bool & stream_started);
 
     ILocalModelRuntime & local_runtime_;
     ICloudClient & cloud_client_;

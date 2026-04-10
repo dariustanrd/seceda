@@ -1,0 +1,8 @@
+{
+  "model": "seceda/default",
+  "messages": [
+    { "role": "user", "content": "Hello" }
+  ],
+  "temperature": 0.2,
+  "max_tokens": 64
+}

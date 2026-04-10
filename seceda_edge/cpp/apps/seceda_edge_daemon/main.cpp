@@ -1,19 +1,24 @@
 #include "cloud_bridge/cloud_client.hpp"
-#include "local_models/llama_runtime.hpp"
+#include "local_models/local_engine_registry.hpp"
 #include "router/heuristic_router.hpp"
+#include "openai_compat/openai_compat.hpp"
 #include "runtime/edge_daemon.hpp"
 #include "runtime/runtime_config.hpp"
 
 #include <cpp-httplib/httplib.h>
 #include <nlohmann/json.hpp>
 
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <string>
+#include <vector>
 
 namespace {
 
 using json = nlohmann::json;
 using namespace seceda::edge;
+namespace oa = seceda::edge::openai_compat;
 
 json router_config_to_json(const RouterConfig & config) {
     return {
@@ -28,7 +33,15 @@ json router_config_to_json(const RouterConfig & config) {
 json local_model_info_to_json(const LocalModelInfo & info) {
     return {
         {"ready", info.ready},
+        {"engine_id", info.engine_id},
+        {"backend_id", info.backend_id},
+        {"model_id", info.model_id},
+        {"model_alias", info.model_alias},
+        {"display_name", info.display_name},
+        {"execution_mode", info.execution_mode},
+        {"capabilities", info.capabilities},
         {"model_path", info.model_path},
+        {"endpoint_base_url", info.endpoint_base_url},
         {"description", info.description},
         {"last_error", info.last_error},
         {"context_size", info.context_size},
@@ -42,17 +55,57 @@ json local_model_info_to_json(const LocalModelInfo & info) {
     };
 }
 
+json local_model_config_to_json(const LocalModelConfig & config) {
+    return {
+        {"engine_id", config.engine_id},
+        {"backend_id", config.backend_id},
+        {"model_id", config.model_id},
+        {"model_alias", config.model_alias},
+        {"display_name", config.display_name},
+        {"execution_mode", config.execution_mode},
+        {"capabilities", config.capabilities},
+        {"model_path", config.model_path},
+        {"sidecar_base_url", config.sidecar_base_url},
+        {"sidecar_timeout_seconds", config.sidecar_timeout_seconds},
+        {"sidecar_connect_timeout_seconds", config.sidecar_connect_timeout_seconds},
+        {"sidecar_verify_tls", config.sidecar_verify_tls},
+    };
+}
+
 json cloud_client_info_to_json(const CloudClientInfo & info) {
     return {
         {"configured", info.configured},
-        {"base_url", info.base_url},
+        {"backend_id", info.backend_id},
         {"model", info.model},
+        {"model_alias", info.model_alias},
+        {"display_name", info.display_name},
+        {"execution_mode", info.execution_mode},
+        {"capabilities", info.capabilities},
+        {"base_url", info.base_url},
         {"timeout_seconds", info.timeout_seconds},
         {"connect_timeout_seconds", info.connect_timeout_seconds},
         {"retry_attempts", info.retry_attempts},
         {"retry_backoff_ms", info.retry_backoff_ms},
         {"send_modal_session_id", info.send_modal_session_id},
         {"verify_tls", info.verify_tls},
+    };
+}
+
+json cloud_config_to_json(const CloudConfig & config) {
+    return {
+        {"backend_id", config.backend_id},
+        {"model", config.model},
+        {"model_alias", config.model_alias},
+        {"display_name", config.display_name},
+        {"execution_mode", config.execution_mode},
+        {"capabilities", config.capabilities},
+        {"base_url", config.base_url},
+        {"timeout_seconds", config.timeout_seconds},
+        {"connect_timeout_seconds", config.connect_timeout_seconds},
+        {"retry_attempts", config.retry_attempts},
+        {"retry_backoff_ms", config.retry_backoff_ms},
+        {"send_modal_session_id", config.send_modal_session_id},
+        {"verify_tls", config.verify_tls},
     };
 }
 
@@ -67,11 +120,30 @@ json health_to_json(const HealthSnapshot & health) {
 }
 
 json info_to_json(const InfoSnapshot & info) {
+    json exposed_models = json::array();
+    for (const auto & model : info.exposed_models) {
+        exposed_models.push_back(oa::model_catalog_entry_json(model));
+    }
+
+    json configured_local_engines = json::array();
+    for (const auto & engine : info.configured_local_engines) {
+        configured_local_engines.push_back(local_model_config_to_json(engine));
+    }
+
+    json configured_remote_backends = json::array();
+    for (const auto & backend : info.configured_remote_backends) {
+        configured_remote_backends.push_back(cloud_config_to_json(backend));
+    }
+
     return {
         {"state", to_string(info.state)},
         {"host", info.host},
         {"port", info.port},
         {"default_system_prompt", info.default_system_prompt},
+        {"public_model_alias", info.public_model_alias},
+        {"exposed_models", std::move(exposed_models)},
+        {"configured_local_engines", std::move(configured_local_engines)},
+        {"configured_remote_backends", std::move(configured_remote_backends)},
         {"router", router_config_to_json(info.router_config)},
         {"local_model", local_model_info_to_json(info.local_model)},
         {"cloud_client", cloud_client_info_to_json(info.cloud_client)},
@@ -86,149 +158,52 @@ json timing_to_json(const TimingInfo & timing) {
         {"ttft_ms", timing.ttft_ms},
         {"prompt_tokens", timing.prompt_tokens},
         {"generated_tokens", timing.generated_tokens},
+        {"total_tokens", total_token_count(timing)},
     };
-}
-
-json response_to_json(const InferenceResponse & response) {
-    json payload = {
-        {"ok", response.ok},
-        {"error_kind", to_string(response.error_kind)},
-        {"error", response.error},
-        {"text", response.text},
-        {"requested_target", to_string(response.requested_target)},
-        {"initial_target", to_string(response.initial_target)},
-        {"final_target", to_string(response.final_target)},
-        {"fallback_used", response.fallback_used},
-        {"fallback_reason", response.fallback_reason},
-        {"route_reason", response.route_reason},
-        {"matched_rules", response.matched_rules},
-        {"active_model_path", response.active_model_path},
-        {"timing", timing_to_json(response.total_timing)},
-    };
-
-    if (response.local_timing.has_value()) {
-        payload["local_timing"] = timing_to_json(*response.local_timing);
-    }
-    if (response.cloud_timing.has_value()) {
-        payload["cloud_timing"] = timing_to_json(*response.cloud_timing);
-    }
-
-    return payload;
 }
 
 json event_to_json(const InferenceEvent & event) {
-    return {
+    json payload = {
         {"id", event.id},
+        {"request_id", event.request_id},
         {"timestamp_utc", event.timestamp_utc},
+        {"requested_target", to_string(event.requested_target)},
         {"initial_target", to_string(event.initial_target)},
         {"final_target", to_string(event.final_target)},
         {"ok", event.ok},
         {"fallback_used", event.fallback_used},
         {"error_kind", to_string(event.error_kind)},
+        {"error", event.error},
+        {"finish_reason", event.finish_reason},
         {"route_reason", event.route_reason},
         {"fallback_reason", event.fallback_reason},
-        {"total_latency_ms", event.total_latency_ms},
-        {"local_latency_ms", event.local_latency_ms},
-        {"cloud_latency_ms", event.cloud_latency_ms},
+        {"matched_rules", event.matched_rules},
+        {"initial_engine_id", event.initial_engine_id},
+        {"initial_backend_id", event.initial_backend_id},
+        {"initial_model_id", event.initial_model_id},
+        {"initial_model_alias", event.initial_model_alias},
+        {"initial_execution_mode", event.initial_execution_mode},
+        {"engine_id", event.engine_id},
+        {"backend_id", event.backend_id},
+        {"model_id", event.model_id},
+        {"model_alias", event.model_alias},
+        {"display_name", event.display_name},
+        {"execution_mode", event.execution_mode},
+        {"active_model_path", event.active_model_path},
+        {"timing", timing_to_json(event.timing)},
+        {"total_latency_ms", event.timing.total_latency_ms},
+        {"local_latency_ms", event.local_timing.has_value() ? event.local_timing->total_latency_ms : 0.0},
+        {"cloud_latency_ms", event.cloud_timing.has_value() ? event.cloud_timing->total_latency_ms : 0.0},
     };
-}
 
-bool read_int(const json & object, const char * key, int & out) {
-    if (!object.contains(key)) {
-        return true;
+    if (event.local_timing.has_value()) {
+        payload["local_timing"] = timing_to_json(*event.local_timing);
     }
-    if (!object[key].is_number_integer()) {
-        return false;
-    }
-    out = object[key].get<int>();
-    return true;
-}
-
-bool read_uint(const json & object, const char * key, std::uint32_t & out) {
-    if (!object.contains(key)) {
-        return true;
-    }
-    if (!object[key].is_number_integer()) {
-        return false;
-    }
-    out = object[key].get<std::uint32_t>();
-    return true;
-}
-
-bool read_float(const json & object, const char * key, float & out) {
-    if (!object.contains(key)) {
-        return true;
-    }
-    if (!object[key].is_number()) {
-        return false;
-    }
-    out = object[key].get<float>();
-    return true;
-}
-
-bool parse_inference_request(
-    const std::string & body,
-    const DaemonConfig & config,
-    InferenceRequest & request,
-    std::string & error) {
-    json parsed;
-    try {
-        parsed = json::parse(body);
-    } catch (const std::exception & exception) {
-        error = std::string("Invalid JSON: ") + exception.what();
-        return false;
+    if (event.cloud_timing.has_value()) {
+        payload["cloud_timing"] = timing_to_json(*event.cloud_timing);
     }
 
-    if (!parsed.contains("text") || !parsed["text"].is_string()) {
-        error = "Request body must contain a string field named 'text'";
-        return false;
-    }
-
-    request.text = parsed["text"].get<std::string>();
-    if (parsed.contains("system_prompt") && !parsed["system_prompt"].is_string()) {
-        error = "system_prompt must be a string when provided";
-        return false;
-    }
-    request.system_prompt = parsed.contains("system_prompt")
-        ? parsed["system_prompt"].get<std::string>()
-        : config.default_system_prompt;
-    request.options = config.default_generation;
-
-    if (parsed.contains("route_override")) {
-        if (!parsed["route_override"].is_string() ||
-            !parse_route_target(parsed["route_override"].get<std::string>(), request.route_override)) {
-            error = "route_override must be one of: auto, local, cloud";
-            return false;
-        }
-    }
-
-    if (parsed.contains("options")) {
-        if (!parsed["options"].is_object()) {
-            error = "options must be a JSON object";
-            return false;
-        }
-
-        const auto & options = parsed["options"];
-        if (!read_int(options, "max_tokens", request.options.max_tokens) ||
-            !read_float(options, "temperature", request.options.temperature) ||
-            !read_float(options, "top_p", request.options.top_p) ||
-            !read_int(options, "top_k", request.options.top_k) ||
-            !read_float(options, "min_p", request.options.min_p) ||
-            !read_uint(options, "seed", request.options.seed)) {
-            error = "One or more generation options had an invalid type";
-            return false;
-        }
-
-        if (options.contains("use_chat_template")) {
-            if (!options["use_chat_template"].is_boolean()) {
-                error = "options.use_chat_template must be a boolean";
-                return false;
-            }
-            request.options.use_chat_template = options["use_chat_template"].get<bool>();
-        }
-    }
-
-    return true;
+    return payload;
 }
 
 bool parse_query_uint64(
@@ -255,27 +230,6 @@ int http_status_for_state(RuntimeState state) {
     return state == RuntimeState::kReady || state == RuntimeState::kDegraded ? 200 : 503;
 }
 
-int http_status_for_response(const InferenceResponse & response) {
-    if (response.ok) {
-        return 200;
-    }
-
-    switch (response.error_kind) {
-        case InferenceErrorKind::kInvalidRequest:
-            return 400;
-        case InferenceErrorKind::kLocalUnavailable:
-        case InferenceErrorKind::kCloudUnavailable:
-            return 503;
-        case InferenceErrorKind::kLocalFailure:
-        case InferenceErrorKind::kCloudFailure:
-            return 502;
-        case InferenceErrorKind::kNone:
-            return 500;
-    }
-
-    return 500;
-}
-
 }  // namespace
 
 int main(int argc, char ** argv) {
@@ -291,8 +245,8 @@ int main(int argc, char ** argv) {
         return 0;
     }
 
-    auto local_runtime = std::make_shared<LlamaRuntime>();
-    auto cloud_client = std::make_shared<CloudClient>(config.cloud);
+    auto local_runtime = std::make_shared<LocalEngineRegistry>();
+    auto cloud_client = std::make_shared<CloudClient>(config.cloud, config.remote_backends);
     auto router = std::make_shared<HeuristicRouter>(config.router);
 
     EdgeDaemon daemon(config, local_runtime, cloud_client, router);
@@ -323,6 +277,8 @@ int main(int argc, char ** argv) {
         std::string error;
         std::uint64_t since_id = 0;
         std::uint64_t limit = 1000;
+        const std::string request_id =
+            request.has_param("request_id") ? request.get_param_value("request_id") : std::string{};
         if (!parse_query_uint64(request, "since_id", 0, since_id, error) ||
             !parse_query_uint64(request, "limit", 1000, limit, error)) {
             response.status = 400;
@@ -330,13 +286,16 @@ int main(int argc, char ** argv) {
             return;
         }
 
-        const auto batch = daemon.events(since_id, static_cast<std::size_t>(limit));
+        const auto batch = daemon.events(since_id, static_cast<std::size_t>(limit), request_id);
         json payload = {
             {"since_id", batch.since_id},
             {"latest_id", batch.latest_id},
             {"returned", batch.events.size()},
             {"events", json::array()},
         };
+        if (!request_id.empty()) {
+            payload["request_id"] = request_id;
+        }
         for (const auto & event : batch.events) {
             payload["events"].push_back(event_to_json(event));
         }
@@ -344,18 +303,48 @@ int main(int argc, char ** argv) {
         response.set_content(payload.dump(2), "application/json");
     });
 
-    server.Post("/inference", [&](const httplib::Request & request, httplib::Response & response) {
+    server.Get("/v1/models", [&](const httplib::Request &, httplib::Response & response) {
+        response.set_content(oa::models_list_payload(config).dump(), "application/json");
+    });
+
+    server.Post("/v1/chat/completions", [&](const httplib::Request & request, httplib::Response & response) {
         InferenceRequest inference_request;
         std::string error;
-        if (!parse_inference_request(request.body, config, inference_request, error)) {
-            response.status = 400;
-            response.set_content(json{{"ok", false}, {"error", error}}.dump(2), "application/json");
+        if (!oa::parse_chat_completion_request(request.body, config, inference_request, error)) {
+            oa::set_openai_error(response, 400, error, "invalid_request_error");
             return;
         }
 
-        const auto inference_response = daemon.handle_inference(std::move(inference_request));
-        response.status = http_status_for_response(inference_response);
-        response.set_content(response_to_json(inference_response).dump(2), "application/json");
+        const std::string completion_id = oa::ensure_chat_completion_id(inference_request);
+        if (inference_request.options.stream) {
+            oa::set_streaming_chat_completion_response(
+                response,
+                daemon,
+                std::move(inference_request),
+                request.is_connection_closed);
+            return;
+        }
+
+        const auto inference_response = daemon.handle_inference(inference_request);
+        if (!inference_response.ok) {
+            oa::set_openai_error(
+                response,
+                oa::http_status_for_inference(inference_response),
+                inference_response.error.empty() ? "Inference request failed" : inference_response.error,
+                oa::openai_error_type(inference_response));
+            return;
+        }
+
+        const std::int64_t created_at = oa::unix_timestamp_now();
+
+        response.set_content(
+            oa::chat_completion_response(
+                inference_request,
+                inference_response,
+                completion_id,
+                created_at)
+                .dump(),
+            "application/json");
     });
 
     server.Post("/admin/model", [&](const httplib::Request & request, httplib::Response & response) {

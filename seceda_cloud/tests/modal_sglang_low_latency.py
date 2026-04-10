@@ -31,6 +31,9 @@ import aiohttp
 import modal
 import modal.experimental
 
+from seceda_cloud.modal_server_helpers import wait_ready, warmup_chat_server
+from seceda_cloud.sglang_compile import compile_deep_gemm_if_enabled
+
 MINUTES = 60  # seconds
 
 sglang_image = (
@@ -117,13 +120,11 @@ sglang_image = sglang_image.env({"SGLANG_ENABLE_JIT_DEEPGEMM": "1"})
 
 
 def compile_deep_gemm():
-    import os
-
-    if int(os.environ.get("SGLANG_ENABLE_JIT_DEEPGEMM", "1")):
-        subprocess.run(
-            f"python3 -m sglang.compile_deep_gemm --model-path {MODEL_NAME} --revision {MODEL_REVISION} --tp {N_GPUS}",
-            shell=True,
-        )
+    compile_deep_gemm_if_enabled(
+        model_name=MODEL_NAME,
+        model_revision=MODEL_REVISION,
+        tensor_parallel_size=N_GPUS,
+    )
 
 
 # We run this Python function on Modal as part of building the Image
@@ -313,39 +314,6 @@ TARGET_INPUTS = 10
 with sglang_image.imports():
     import requests
 
-
-def wait_ready(process: subprocess.Popen, timeout: int = 5 * MINUTES):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            check_running(process)
-            requests.get(f"http://127.0.0.1:{PORT}/health").raise_for_status()
-            return
-        except (
-            subprocess.CalledProcessError,
-            requests.exceptions.ConnectionError,
-            requests.exceptions.HTTPError,
-        ):
-            time.sleep(5)
-    raise TimeoutError(f"SGLang server not ready within {timeout} seconds")
-
-
-def check_running(p: subprocess.Popen):
-    if (rc := p.poll()) is not None:
-        raise subprocess.CalledProcessError(rc, cmd=p.args)
-
-
-def warmup():
-    payload = {
-        "messages": [{"role": "user", "content": "Hello, how are you?"}],
-        "max_tokens": 16,
-    }
-    for _ in range(3):
-        requests.post(
-            f"http://127.0.0.1:{PORT}/v1/chat/completions", json=payload, timeout=10
-        ).raise_for_status()
-
-
 # With all this in place, we are ready to define our high-performance, low-latency
 # LLM inference server.
 
@@ -400,8 +368,13 @@ class SGLang:
         ]
 
         self.process = subprocess.Popen(cmd)
-        wait_ready(self.process)
-        warmup()
+        wait_ready(self.process, requests_module=requests, port=PORT, label="SGLang", timeout=5 * MINUTES)
+        warmup_chat_server(
+            requests_module=requests,
+            port=PORT,
+            model=None,
+            timeout=10,
+        )
 
     @modal.exit()
     def stop(self):

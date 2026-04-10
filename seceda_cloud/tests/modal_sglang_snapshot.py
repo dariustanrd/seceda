@@ -39,6 +39,14 @@ import aiohttp
 import modal
 import modal.experimental
 
+from seceda_cloud.modal_server_helpers import (
+    sleep_sglang_server,
+    wait_ready,
+    warmup_chat_server,
+    wake_sglang_server,
+)
+from seceda_cloud.sglang_compile import compile_deep_gemm_if_enabled
+
 MINUTES = 60  # seconds
 
 sglang_image = (
@@ -130,13 +138,11 @@ sglang_image = sglang_image.env({"SGLANG_ENABLE_JIT_DEEPGEMM": "1"})
 
 
 def compile_deep_gemm():
-    import os
-
-    if int(os.environ.get("SGLANG_ENABLE_JIT_DEEPGEMM", "1")):
-        subprocess.run(
-            f"python3 -m sglang.compile_deep_gemm --model-path {MODEL_NAME} --revision {MODEL_REVISION} --tp {N_GPUS}",
-            shell=True,
-        )
+    compile_deep_gemm_if_enabled(
+        model_name=MODEL_NAME,
+        model_revision=MODEL_REVISION,
+        tensor_parallel_size=N_GPUS,
+    )
 
 
 # We run this Python function on Modal as part of building the Image
@@ -193,30 +199,6 @@ sglang_image = sglang_image.env({"TORCHINDUCTOR_COMPILE_THREADS": "1"})
 with sglang_image.imports():
     import requests
 
-
-def warmup():
-    payload = {
-        "messages": [{"role": "user", "content": "Hello, how are you?"}],
-        "max_tokens": 16,
-    }
-    for _ in range(3):
-        requests.post(
-            f"http://127.0.0.1:{PORT}/v1/chat/completions", json=payload, timeout=10
-        ).raise_for_status()
-
-
-def sleep():
-    requests.post(
-        f"http://127.0.0.1:{PORT}/release_memory_occupation", json={}
-    ).raise_for_status()
-
-
-def wake_up():
-    requests.post(
-        f"http://127.0.0.1:{PORT}/resume_memory_occupation", json={}
-    ).raise_for_status()
-
-
 # ## Define the inference server and infrastructure
 
 # We wrap up all of the choices we made about the infrastructure
@@ -269,28 +251,7 @@ MAX_INPUTS = 1000
 # Modal considers a new replica ready to receive inputs once the `@modal.enter` methods have exited
 # and the container accepts connections.
 # To ensure that we actually finish setting up our server before we are marked ready for inputs,
-# we define a helper function to check whether the server is finished setting up.
-
-
-def wait_ready(process: subprocess.Popen, timeout: int = 5 * MINUTES):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            check_running(process)
-            requests.get(f"http://127.0.0.1:{PORT}/health").raise_for_status()
-            return
-        except (
-            subprocess.CalledProcessError,
-            requests.exceptions.ConnectionError,
-            requests.exceptions.HTTPError,
-        ):
-            time.sleep(1)
-    raise TimeoutError(f"SGLang server not ready within timeout of {timeout} seconds")
-
-
-def check_running(p: subprocess.Popen):
-    if (rc := p.poll()) is not None:
-        raise subprocess.CalledProcessError(rc, cmd=p.args)
+# we use a small shared helper that polls the local health endpoint.
 
 
 # With all this in place, we are ready to define our high-performance, low-latency
@@ -339,13 +300,25 @@ class SGLang:
         ]
 
         self.process = subprocess.Popen(cmd)
-        wait_ready(self.process)
-        warmup()  # for snapshotting
-        sleep()
+        wait_ready(
+            self.process,
+            requests_module=requests,
+            port=PORT,
+            label="SGLang",
+            timeout=5 * MINUTES,
+            poll_interval_seconds=1,
+        )
+        warmup_chat_server(
+            requests_module=requests,
+            port=PORT,
+            model=None,
+            timeout=10,
+        )  # for snapshotting
+        sleep_sglang_server(requests_module=requests, port=PORT)
 
     @modal.enter(snap=False)
     def wake_up(self):
-        wake_up()
+        wake_sglang_server(requests_module=requests, port=PORT)
 
     @modal.web_server(
         port=PORT,  # wrapped code must listen on this port

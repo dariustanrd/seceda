@@ -8,13 +8,17 @@ import os
 import shlex
 import subprocess
 import time
-import urllib.error
-import urllib.request
 from typing import Any
 
 import aiohttp
 import modal
 import modal.experimental
+
+from seceda_cloud.local_server_utils import (
+    request_bytes,
+    wait_until_ready,
+    warm_up_chat_server,
+)
 
 APP_NAME = "seceda-vllm-inference"
 MODEL_NAME = os.getenv("SECEDA_VLLM_MODEL", "LiquidAI/LFM2-24B-A2B")
@@ -60,81 +64,12 @@ vllm_image = (
 )
 
 
-def _localhost_url(path: str) -> str:
-    return f"http://127.0.0.1:{VLLM_PORT}{path}"
-
-
-def _request(
-    path: str,
-    *,
-    method: str = "GET",
-    json_body: dict[str, Any] | None = None,
-    timeout_seconds: float = 60,
-) -> bytes:
-    data = None
-    headers: dict[str, str] = {}
-    if json_body is not None:
-        data = json.dumps(json_body).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-
-    request = urllib.request.Request(
-        _localhost_url(path),
-        data=data,
-        headers=headers,
-        method=method,
-    )
-    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-        return response.read()
-
-
-def _check_running(process: subprocess.Popen[str]) -> None:
-    if (return_code := process.poll()) is not None:
-        raise subprocess.CalledProcessError(return_code, process.args)
-
-
-def _wait_until_ready(
-    process: subprocess.Popen[str],
-    timeout_seconds: int = SERVER_STARTUP_TIMEOUT_SECONDS,
-) -> None:
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        try:
-            _check_running(process)
-            _request("/health", timeout_seconds=10)
-            return
-        except (
-            OSError,
-            TimeoutError,
-            subprocess.CalledProcessError,
-            urllib.error.HTTPError,
-            urllib.error.URLError,
-        ):
-            time.sleep(HEALTH_CHECK_INTERVAL_SECONDS)
-
-    raise TimeoutError(f"vLLM server not ready within {timeout_seconds} seconds")
-
-
-def _warm_up_server() -> None:
-    payload = {
-        "model": SERVED_MODEL_NAME,
-        "messages": [{"role": "user", "content": "Hello, how are you?"}],
-        "max_tokens": 16,
-    }
-    for _ in range(3):
-        _request(
-            "/v1/chat/completions",
-            method="POST",
-            json_body=payload,
-            timeout_seconds=3 * MINUTES,
-        )
-
-
 def _sleep_server(level: int = 1) -> None:
-    _request(f"/sleep?level={level}", method="POST", timeout_seconds=60)
+    request_bytes(VLLM_PORT, f"/sleep?level={level}", method="POST", timeout_seconds=60)
 
 
 def _wake_server() -> None:
-    _request("/wake_up", method="POST", timeout_seconds=60)
+    request_bytes(VLLM_PORT, "/wake_up", method="POST", timeout_seconds=60)
 
 
 def _build_vllm_command() -> list[str]:
@@ -199,8 +134,18 @@ class SecedaVllmInference:
         cmd = _build_vllm_command()
         print(shlex.join(cmd))
         self.process = subprocess.Popen(cmd)
-        _wait_until_ready(self.process)
-        _warm_up_server()
+        wait_until_ready(
+            self.process,
+            port=VLLM_PORT,
+            label="vLLM",
+            timeout_seconds=SERVER_STARTUP_TIMEOUT_SECONDS,
+            health_check_interval_seconds=HEALTH_CHECK_INTERVAL_SECONDS,
+        )
+        warm_up_chat_server(
+            port=VLLM_PORT,
+            model=SERVED_MODEL_NAME,
+            timeout_seconds=3 * MINUTES,
+        )
         _sleep_server()
 
     @modal.enter(snap=False)

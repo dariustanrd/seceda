@@ -745,9 +745,11 @@ run_build() {
         build_cmd+=(--parallel "${JOBS}")
     fi
 
-    for target in "${TARGETS[@]}"; do
-        build_cmd+=(--target "${target}")
-    done
+    if [[ "${#TARGETS[@]}" -gt 0 ]]; then
+        for target in "${TARGETS[@]}"; do
+            build_cmd+=(--target "${target}")
+        done
+    fi
 
     if [[ "${#BUILD_ARGS[@]}" -gt 0 ]]; then
         build_cmd+=("${BUILD_ARGS[@]}")

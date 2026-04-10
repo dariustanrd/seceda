@@ -54,6 +54,13 @@ import aiohttp
 import modal
 import modal.experimental
 
+from seceda_cloud.modal_server_helpers import (
+    sleep_vllm_server,
+    wait_ready,
+    warmup_chat_server,
+    wake_vllm_server,
+)
+
 MINUTES = 60
 
 MODEL_NAME = os.environ.get("MODEL_NAME", "LiquidAI/LFM2-24B-A2B")
@@ -202,51 +209,6 @@ with vllm_image.imports():
     import requests
 
 
-def wait_ready(process: subprocess.Popen, timeout: int = 15 * MINUTES):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            check_running(process)
-            requests.get(f"http://127.0.0.1:{VLLM_PORT}/health").raise_for_status()
-            return
-        except (
-            subprocess.CalledProcessError,
-            requests.exceptions.ConnectionError,
-            requests.exceptions.HTTPError,
-        ):
-            time.sleep(5)
-    raise TimeoutError(f"vLLM server not ready within {timeout} seconds")
-
-
-def check_running(p: subprocess.Popen):
-    if (rc := p.poll()) is not None:
-        raise subprocess.CalledProcessError(rc, cmd=p.args)
-
-
-def warmup():
-    payload = {
-        "model": "llm",
-        "messages": [{"role": "user", "content": "Hello, how are you?"}],
-        "max_tokens": 16,
-    }
-    for _ in range(3):
-        requests.post(
-            f"http://127.0.0.1:{VLLM_PORT}/v1/chat/completions",
-            json=payload,
-            timeout=60,
-        ).raise_for_status()
-
-
-def sleep(level: int = 1):
-    requests.post(
-        f"http://127.0.0.1:{VLLM_PORT}/sleep?level={level}"
-    ).raise_for_status()
-
-
-def wake_up():
-    requests.post(f"http://127.0.0.1:{VLLM_PORT}/wake_up").raise_for_status()
-
-
 # ### Controlling container lifecycles with `modal.Cls`
 
 # We wrap up all of the choices we made about the infrastructure
@@ -330,14 +292,25 @@ class LfmVllmInference:
 
         print(*cmd)
         self.process = subprocess.Popen(cmd)
-        wait_ready(self.process)
-        warmup()
-        sleep(level=1)
+        wait_ready(
+            self.process,
+            requests_module=requests,
+            port=VLLM_PORT,
+            label="vLLM",
+            timeout=15 * MINUTES,
+        )
+        warmup_chat_server(
+            requests_module=requests,
+            port=VLLM_PORT,
+            model="llm",
+            timeout=60,
+        )
+        sleep_vllm_server(requests_module=requests, port=VLLM_PORT, level=1)
 
     @modal.enter(snap=False)
     def restore(self):
         """Wake vLLM from sleep mode after restoring from a memory snapshot."""
-        wake_up()
+        wake_vllm_server(requests_module=requests, port=VLLM_PORT)
 
     @modal.exit()
     def stop(self):

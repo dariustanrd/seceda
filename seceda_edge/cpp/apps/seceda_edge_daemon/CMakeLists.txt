@@ -8,5 +8,6 @@ seceda_add_edge_executable(
         seceda_edge_local_models
         seceda_edge_cloud_bridge
         seceda_edge_telemetry
+        seceda_edge_openai_compat
         seceda_edge_httplib
 )

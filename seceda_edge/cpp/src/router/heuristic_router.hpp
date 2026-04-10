@@ -12,7 +12,6 @@ public:
     RouterConfig config() const override;
 
 private:
-    static std::string to_lower_ascii(std::string value);
     static bool contains_any(
         const std::string & haystack,
         const std::vector<std::string> & needles,

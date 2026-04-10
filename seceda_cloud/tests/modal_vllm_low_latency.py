@@ -38,6 +38,13 @@ import aiohttp
 import modal
 import modal.experimental
 
+from seceda_cloud.modal_server_helpers import (
+    sleep_vllm_server,
+    wait_ready,
+    warmup_chat_server,
+    wake_vllm_server,
+)
+
 MINUTES = 60  # seconds
 
 vllm_image = (
@@ -199,47 +206,6 @@ with vllm_image.imports():
 PORT = 8000
 
 
-def wait_ready(process: subprocess.Popen, timeout: int = 5 * MINUTES):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            check_running(process)
-            requests.get(f"http://127.0.0.1:{PORT}/health").raise_for_status()
-            return
-        except (
-            subprocess.CalledProcessError,
-            requests.exceptions.ConnectionError,
-            requests.exceptions.HTTPError,
-        ):
-            time.sleep(5)
-    raise TimeoutError(f"vLLM server not ready within {timeout} seconds")
-
-
-def check_running(p: subprocess.Popen):
-    if (rc := p.poll()) is not None:
-        raise subprocess.CalledProcessError(rc, cmd=p.args)
-
-
-def warmup():
-    payload = {
-        "model": MODEL_NAME,
-        "messages": [{"role": "user", "content": "Hello, how are you?"}],
-        "max_tokens": 16,
-    }
-    for _ in range(3):
-        requests.post(
-            f"http://127.0.0.1:{PORT}/v1/chat/completions", json=payload, timeout=10
-        ).raise_for_status()
-
-
-def sleep(level: int = 1):
-    requests.post(f"http://127.0.0.1:{PORT}/sleep?level={level}").raise_for_status()
-
-
-def wake_up():
-    requests.post(f"http://127.0.0.1:{PORT}/wake_up").raise_for_status()
-
-
 # With all this in place, we are ready to define our high-performance, low-latency
 # LLM inference server.
 
@@ -287,14 +253,19 @@ class VLLM:
         ]
 
         self.process = subprocess.Popen(cmd)
-        wait_ready(self.process)
-        warmup()
-        sleep(1)
+        wait_ready(self.process, requests_module=requests, port=PORT, label="vLLM", timeout=5 * MINUTES)
+        warmup_chat_server(
+            requests_module=requests,
+            port=PORT,
+            model=MODEL_NAME,
+            timeout=10,
+        )
+        sleep_vllm_server(requests_module=requests, port=PORT, level=1)
 
     @modal.enter(snap=False)
     def restore(self):
         """Wake vLLM from sleep mode after restoring from a memory snapshot."""
-        wake_up()
+        wake_vllm_server(requests_module=requests, port=PORT)
 
     @modal.exit()
     def stop(self):

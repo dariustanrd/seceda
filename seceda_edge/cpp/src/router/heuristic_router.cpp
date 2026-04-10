@@ -1,7 +1,6 @@
 #include "router/heuristic_router.hpp"
+#include "text_utils/normalize.hpp"
 
-#include <algorithm>
-#include <cctype>
 #include <cmath>
 #include <sstream>
 
@@ -12,11 +11,29 @@ HeuristicRouter::HeuristicRouter(RouterConfig config) : config_(std::move(config
 RouteDecision HeuristicRouter::decide(const InferenceRequest & request) const {
     RouteDecision decision;
     decision.target = RouteTarget::kLocal;
+    decision.preferred_engine_id = request.seceda.preferred_engine_id;
+    decision.resolved_backend_id = request.seceda.preferred_backend_id;
+    decision.resolved_model_alias = request.seceda.preferred_model_alias;
 
-    const std::string lowered = to_lower_ascii(request.text);
+    const std::string lowered = text_utils::to_lower_ascii_copy(request.normalized.routing_prompt);
     decision.estimated_tokens = estimate_token_count(lowered);
 
-    if (request.text.size() > config_.max_prompt_chars) {
+    if (request.capabilities.requires_remote_backend) {
+        decision.target = RouteTarget::kCloud;
+        decision.reason = "remote_capability_required";
+        if (request.capabilities.has_tools) {
+            decision.matched_rules.push_back("tools");
+        }
+        if (request.capabilities.requests_tool_choice) {
+            decision.matched_rules.push_back("tool_choice");
+        }
+        if (request.capabilities.requests_structured_output) {
+            decision.matched_rules.push_back("response_format");
+        }
+        return decision;
+    }
+
+    if (request.normalized.routing_prompt.size() > config_.max_prompt_chars) {
         decision.target = RouteTarget::kCloud;
         decision.reason = "prompt_too_long";
         decision.matched_rules.push_back("max_prompt_chars");
@@ -56,15 +73,6 @@ RouterConfig HeuristicRouter::config() const {
     return config_;
 }
 
-std::string HeuristicRouter::to_lower_ascii(std::string value) {
-    std::transform(
-        value.begin(),
-        value.end(),
-        value.begin(),
-        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-    return value;
-}
-
 bool HeuristicRouter::contains_any(
     const std::string & haystack,
     const std::vector<std::string> & needles,
@@ -73,7 +81,7 @@ bool HeuristicRouter::contains_any(
         if (needle.empty()) {
             continue;
         }
-        if (haystack.find(to_lower_ascii(needle)) != std::string::npos) {
+        if (haystack.find(text_utils::to_lower_ascii_copy(needle)) != std::string::npos) {
             matched.push_back(needle);
         }
     }

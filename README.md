@@ -1,10 +1,32 @@
 # seceda
 
-**Edge-first LLM inference with intelligent cloud fallback.**
+**OpenAI-compatible local edge chat-completions service with local-first routing.**
 
-Seceda is a framework for **hybrid edge–cloud LLM inference**. It allows edge devices to run **Small Language Models** (SLMs) for fast, private responses, while **escalating difficult queries to powerful cloud-hosted models when necessary**.
+Seceda turns `seceda_edge_daemon` into a localhost OpenAI-compatible service that exposes `GET /v1/models` and `POST /v1/chat/completions`, while keeping Seceda’s routing, fallback, model lifecycle, and observability at the execution layer.
 
 Like the famous ridgeline of Seceda in the Dolomites, the system sits **between the edge and the cloud** — handling what it can locally, and elevating into the cloud when needed.
+
+Seceda’s supported inference surface is now the OpenAI-compatible pair `GET /v1/models` and `POST /v1/chat/completions`. Use `GET /metrics/events?request_id=<openai_id>` when you need Seceda-specific routing and timing diagnostics for a completed request.
+
+---
+
+## OpenAI Edge Service
+
+The current edge daemon shape is:
+
+- OpenAI transport layer under `seceda_edge/cpp/src/openai_compat/`
+- Normalized internal request and response envelope under `seceda_edge/cpp/src/runtime/contracts.hpp`
+- Local engine registry under `seceda_edge/cpp/src/local_models/`
+- Current local adapters:
+  `llama.cpp` in-process and a localhost OpenAI-compatible `sidecar_server` adapter
+- Reserved future adapter shapes:
+  `sdk_bridge` entries for Cactus- and RunAnywhere-style integrations
+- Localhost phase-1 auth posture:
+  no daemon auth layer by default; deploy behind trusted localhost boundaries
+- Human-edited runtime config:
+  `seceda_edge/config/seceda.toml`
+- Shared config metadata catalog for CLI help and future TUI/GUI work:
+  `seceda_edge/config/config_catalog.toml`
 
 ---
 
@@ -108,14 +130,15 @@ This architecture makes it easy to **deploy hybrid edge-cloud inference without 
 
 ## Features
 
-1. Edge-first inference with **local SLMs**
-2. Local **automatic routing** to cloud LLMs
-3. Support for **distributed edge devices** with **llama.cpp runtimes**
-4. **Modal-powered ephemeral cloud execution**
+1. OpenAI-compatible localhost edge service for `chat.completions`
+2. Edge-first inference with **local SLMs**
+3. Local **automatic routing** to cloud LLMs
+4. Support for **distributed edge devices** with **llama.cpp** and localhost sidecar runtimes
+5. **Modal-powered ephemeral cloud execution**
     - vLLM / SGLang (future)
-5. **Dynamic cloud model tiering** (future)
+6. **Dynamic cloud model tiering** (future)
     - Select model size and GPU class based on request difficulty.
-6. Easy to deploy for **experiments or demos**
+7. Easy to deploy for **experiments or demos**
     - Fleet-scale operation synthetic load testing.
     - Demo-friendly user interface
 
@@ -252,20 +275,27 @@ If you use a Vulkan preset, make sure `glslc` is available on `PATH` or provide 
 * call `add_llama_runner(...)` for `llama.cpp`-based apps, or
 * call `add_executorch_runner(...)` for ExecuTorch-based apps.
 
-### Edge daemon to Modal SGLang
+### Edge daemon as an OpenAI-compatible localhost service
 
-The current edge daemon can call a deployed Modal-backed SGLang URL directly via
-the OpenAI-compatible `POST /v1/chat/completions` interface. The shared
-edge-to-cloud contract lives in `seceda_shared/README.md`.
+The current edge daemon exposes:
 
-For quick local iteration on the edge daemon alone, it is often simpler to
-disable ExecuTorch and build the first-party C++ targets plus `llama.cpp`:
+- `GET /v1/models`
+- `POST /v1/chat/completions`
+- `GET /metrics/events` for request-scoped observability
+
+The shared edge-to-cloud contract lives in `seceda_shared/README.md`.
+
+The daemon now looks for `seceda_edge/config/seceda.toml` by default. Use that
+file for your usual setup, then override specific values with CLI flags when you
+want a one-off run.
+
+For quick local iteration on the edge daemon alone, it is often simpler to disable ExecuTorch and build the first-party C++ targets plus `llama.cpp`:
 
 ```bash
 scripts/build.sh -p apple-silicon-release --cmake-arg -DSECEDA_BUILD_EXECUTORCH=OFF
 ```
 
-Start the daemon with a local GGUF model and the deployed Modal flash URL:
+Start the daemon with a local GGUF model and the deployed Modal-backed URL:
 
 ```bash
 export MODAL_FLASH_URL="https://<your-modal-url>"
@@ -283,7 +313,11 @@ export SECEDA_CLOUD_API_KEY="<token>"
   --cloud-send-modal-session-id true
 ```
 
-Single-turn smoke path:
+If you prefer to keep these settings in a file, edit `seceda_edge/config/seceda.toml`
+and then launch the daemon without repeating the same flags. Use `--config PATH`
+to point at a different profile and `--no-config` to skip TOML loading entirely.
+
+OpenAI smoke path:
 
 1. Verify the deployed Modal endpoint is up:
 
@@ -297,22 +331,42 @@ curl "${MODAL_FLASH_URL}/health"
 curl http://127.0.0.1:8080/health
 ```
 
-3. Force one cloud-routed inference through the edge daemon:
+3. List the models exposed by the daemon:
 
 ```bash
-curl http://127.0.0.1:8080/inference \
+curl http://127.0.0.1:8080/v1/models
+```
+
+`seceda/default` keeps automatic routing. `local/default` forces the local path, and `remote/default` or any named remote alias exposed by your config forces the corresponding cloud backend.
+
+4. Send a chat completion through the OpenAI-compatible edge endpoint:
+
+```bash
+curl http://127.0.0.1:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "text": "Explain why request-scoped Modal session ids are useful.",
-    "route_override": "cloud",
-    "options": {
-      "max_tokens": 96
-    }
+    "model": "seceda/default",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Explain why request-scoped Modal session ids are useful."
+      }
+    ],
+    "max_tokens": 96
   }'
 ```
 
-4. Confirm the response shows `"ok": true`, `"final_target": "cloud"`, and a
-   non-empty `"text"` field.
+5. Confirm the response contains a non-empty `choices[0].message.content` string, a `usage` block, and an OpenAI response `id`.
+
+For streamed responses, add `"stream": true` and optionally `"stream_options": {"include_usage": true}` to the same request body.
+
+6. Use that response `id` to fetch Seceda-specific routing and timing details from the event log:
+
+```bash
+curl "http://127.0.0.1:8080/metrics/events?request_id=<chat_completion_id>"
+```
+
+That event payload includes the routing decision, matched rules, finish reason, active model path, and timing or token metadata without adding Seceda-specific fields to the OpenAI response body.
 
 For the first milestone, the edge daemon generates a fresh `Modal-Session-ID`
 per logical inference request and reuses it only across retries for that same

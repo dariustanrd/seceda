@@ -8,13 +8,18 @@ import os
 import shlex
 import subprocess
 import time
-import urllib.error
-import urllib.request
 from typing import Any
 
 import aiohttp
 import modal
 import modal.experimental
+
+from seceda_cloud.local_server_utils import (
+    request_bytes,
+    wait_until_ready,
+    warm_up_chat_server,
+)
+from seceda_cloud.sglang_compile import compile_deep_gemm_if_enabled
 
 
 def _tensor_parallel_size_from_gpu_config(gpu_config: str) -> int:
@@ -153,55 +158,13 @@ sglang_image = (
 )
 
 
-def _localhost_url(path: str) -> str:
-    return f"http://127.0.0.1:{SGLANG_PORT}{path}"
-
-
-def _request(
-    path: str,
-    *,
-    method: str = "GET",
-    json_body: dict[str, Any] | None = None,
-    timeout_seconds: float = 60,
-) -> bytes:
-    data = None
-    headers: dict[str, str] = {}
-    if json_body is not None:
-        data = json.dumps(json_body).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-
-    request = urllib.request.Request(
-        _localhost_url(path),
-        data=data,
-        headers=headers,
-        method=method,
-    )
-    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-        return response.read()
-
-
 def compile_deep_gemm() -> None:
     """Precompile DeepGEMM kernels when the selected model/backend uses them."""
-    if os.environ.get("SGLANG_ENABLE_JIT_DEEPGEMM", "1") not in {"1", "true", "True"}:
-        return
-
-    command = [
-        "python3",
-        "-m",
-        "sglang.compile_deep_gemm",
-        "--model-path",
-        MODEL_NAME,
-        "--tp",
-        str(N_GPUS),
-    ]
-    if MODEL_REVISION:
-        command.extend(["--revision", MODEL_REVISION])
-
-    result = subprocess.run(command, check=False)
-    if result.returncode != 0:
-        print(
-            "DeepGEMM precompile exited non-zero; runtime compilation will be used if needed."
-        )
+    compile_deep_gemm_if_enabled(
+        model_name=MODEL_NAME,
+        model_revision=MODEL_REVISION,
+        tensor_parallel_size=N_GPUS,
+    )
 
 
 sglang_image = sglang_image.run_function(
@@ -214,50 +177,9 @@ sglang_image = sglang_image.run_function(
 )
 
 
-def _check_running(process: subprocess.Popen[str]) -> None:
-    if (return_code := process.poll()) is not None:
-        raise subprocess.CalledProcessError(return_code, process.args)
-
-
-def _wait_until_ready(
-    process: subprocess.Popen[str],
-    timeout_seconds: int = SERVER_STARTUP_TIMEOUT_SECONDS,
-) -> None:
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        try:
-            _check_running(process)
-            _request("/health", timeout_seconds=10)
-            return
-        except (
-            OSError,
-            TimeoutError,
-            subprocess.CalledProcessError,
-            urllib.error.HTTPError,
-            urllib.error.URLError,
-        ):
-            time.sleep(HEALTH_CHECK_INTERVAL_SECONDS)
-
-    raise TimeoutError(f"SGLang server not ready within {timeout_seconds} seconds")
-
-
-def _warm_up_server() -> None:
-    payload = {
-        "model": SERVED_MODEL_NAME,
-        "messages": [{"role": "user", "content": "Hello, how are you?"}],
-        "max_tokens": 16,
-    }
-    for _ in range(3):
-        _request(
-            "/v1/chat/completions",
-            method="POST",
-            json_body=payload,
-            timeout_seconds=3 * MINUTES,
-        )
-
-
 def _sleep_server() -> None:
-    _request(
+    request_bytes(
+        SGLANG_PORT,
         "/release_memory_occupation",
         method="POST",
         json_body={},
@@ -266,7 +188,8 @@ def _sleep_server() -> None:
 
 
 def _wake_server() -> None:
-    _request(
+    request_bytes(
+        SGLANG_PORT,
         "/resume_memory_occupation",
         method="POST",
         json_body={},
@@ -376,8 +299,18 @@ class SecedaSglangInference:
 
         print(shlex.join(cmd))
         self.process = subprocess.Popen(cmd, env=os.environ.copy())
-        _wait_until_ready(self.process)
-        _warm_up_server()
+        wait_until_ready(
+            self.process,
+            port=SGLANG_PORT,
+            label="SGLang",
+            timeout_seconds=SERVER_STARTUP_TIMEOUT_SECONDS,
+            health_check_interval_seconds=HEALTH_CHECK_INTERVAL_SECONDS,
+        )
+        warm_up_chat_server(
+            port=SGLANG_PORT,
+            model=SERVED_MODEL_NAME,
+            timeout_seconds=3 * MINUTES,
+        )
         _sleep_server()
 
     @modal.enter(snap=False)

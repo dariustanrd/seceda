@@ -25,6 +25,7 @@ dmypy.json
 
 # uv
 .uv/
+.uv-cache/
 
 # CMake
 CMakeCache.txt
@@ -38,6 +39,7 @@ compile_commands.json
 CTestTestfile.cmake
 _deps/
 *.cmake.user
+.cache/
 
 # Compiled files
 *.o

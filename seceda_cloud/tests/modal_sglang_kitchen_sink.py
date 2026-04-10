@@ -23,6 +23,14 @@ import aiohttp
 import modal
 import modal.experimental
 
+from seceda_cloud.modal_server_helpers import (
+    sleep_sglang_server,
+    wait_ready,
+    warmup_chat_server,
+    wake_sglang_server,
+)
+from seceda_cloud.sglang_compile import compile_deep_gemm_if_enabled
+
 MINUTES = 60  # seconds
 
 sglang_image = (
@@ -72,13 +80,11 @@ sglang_image = sglang_image.env({"SGLANG_ENABLE_JIT_DEEPGEMM": "1"})
 
 
 def compile_deep_gemm():
-    import os
-
-    if int(os.environ.get("SGLANG_ENABLE_JIT_DEEPGEMM", "1")):
-        subprocess.run(
-            f"python3 -m sglang.compile_deep_gemm --model-path {MODEL_NAME} --revision {MODEL_REVISION} --tp {N_GPUS}",
-            shell=True,
-        )
+    compile_deep_gemm_if_enabled(
+        model_name=MODEL_NAME,
+        model_revision=MODEL_REVISION,
+        tensor_parallel_size=N_GPUS,
+    )
 
 
 sglang_image = sglang_image.run_function(
@@ -103,30 +109,6 @@ sglang_image = sglang_image.env({"TORCHINDUCTOR_COMPILE_THREADS": "1"})
 with sglang_image.imports():
     import requests
 
-
-def warmup():
-    payload = {
-        "messages": [{"role": "user", "content": "Hello, how are you?"}],
-        "max_tokens": 16,
-    }
-    for _ in range(3):
-        requests.post(
-            f"http://127.0.0.1:{PORT}/v1/chat/completions", json=payload, timeout=10
-        ).raise_for_status()
-
-
-def sleep():
-    requests.post(
-        f"http://127.0.0.1:{PORT}/release_memory_occupation", json={}
-    ).raise_for_status()
-
-
-def wake_up():
-    requests.post(
-        f"http://127.0.0.1:{PORT}/resume_memory_occupation", json={}
-    ).raise_for_status()
-
-
 # ## Define the inference server and infrastructure
 
 # ### Selecting infrastructure to minimize latency
@@ -141,27 +123,6 @@ MIN_CONTAINERS = 0  # set to 1 to ensure one replica is always ready
 TARGET_INPUTS = 10
 
 # ### Controlling container lifecycles with `modal.Cls`
-
-
-def wait_ready(process: subprocess.Popen, timeout: int = 5 * MINUTES):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            check_running(process)
-            requests.get(f"http://127.0.0.1:{PORT}/health").raise_for_status()
-            return
-        except (
-            subprocess.CalledProcessError,
-            requests.exceptions.ConnectionError,
-            requests.exceptions.HTTPError,
-        ):
-            time.sleep(5)
-    raise TimeoutError(f"SGLang server not ready within {timeout} seconds")
-
-
-def check_running(p: subprocess.Popen):
-    if (rc := p.poll()) is not None:
-        raise subprocess.CalledProcessError(rc, cmd=p.args)
 
 
 app = modal.App(name="example-sglang-kitchen-sink")
@@ -223,14 +184,19 @@ class SGLang:
         ]
 
         self.process = subprocess.Popen(cmd, start_new_session=True)
-        wait_ready(self.process)
-        warmup()
-        sleep()  # release GPU memory occupation before snapshot
+        wait_ready(self.process, requests_module=requests, port=PORT, label="SGLang", timeout=5 * MINUTES)
+        warmup_chat_server(
+            requests_module=requests,
+            port=PORT,
+            model=None,
+            timeout=10,
+        )
+        sleep_sglang_server(requests_module=requests, port=PORT)  # release GPU memory occupation before snapshot
 
     @modal.enter(snap=False)
     def restore(self):
         """After snapshot restoration, resume GPU memory occupation."""
-        wake_up()
+        wake_sglang_server(requests_module=requests, port=PORT)
 
     @modal.exit()
     def stop(self):
