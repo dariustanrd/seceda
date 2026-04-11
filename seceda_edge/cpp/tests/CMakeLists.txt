@@ -56,6 +56,15 @@ if(BUILD_TESTING)
     add_test(NAME seceda_edge_metrics_registry_test COMMAND seceda_edge_metrics_registry_test)
 
     seceda_add_edge_executable(
+        seceda_edge_trace_registry_test
+        SOURCES
+            trace_registry_test.cpp
+        EXTRA_LIBS
+            seceda_edge_telemetry
+    )
+    add_test(NAME seceda_edge_trace_registry_test COMMAND seceda_edge_trace_registry_test)
+
+    seceda_add_edge_executable(
         seceda_edge_openai_compat_test
         SOURCES
             openai_compat_test.cpp

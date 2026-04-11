@@ -75,7 +75,8 @@ int main() {
     FakeCloudClient cloud;
     FakeRouter router;
     MetricsRegistry metrics(16);
-    RequestExecutor executor(local, cloud, router, metrics);
+    TraceRegistry traces(64);
+    RequestExecutor executor(local, cloud, router, metrics, traces);
 
     router.decision_.target = RouteTarget::kLocal;
     router.decision_.reason = "local_default";

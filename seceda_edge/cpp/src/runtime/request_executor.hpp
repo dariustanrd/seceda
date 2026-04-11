@@ -2,6 +2,7 @@
 
 #include "runtime/interfaces.hpp"
 #include "telemetry/metrics_registry.hpp"
+#include "telemetry/trace_registry.hpp"
 
 namespace seceda::edge {
 
@@ -11,7 +12,8 @@ public:
         ILocalModelRuntime & local_runtime,
         ICloudClient & cloud_client,
         IRouter & router,
-        MetricsRegistry & metrics);
+        MetricsRegistry & metrics,
+        TraceRegistry & traces);
 
     InferenceResponse execute(const InferenceRequest & request);
     InferenceResponse execute_streaming(
@@ -44,6 +46,7 @@ private:
     ICloudClient & cloud_client_;
     IRouter & router_;
     MetricsRegistry & metrics_;
+    TraceRegistry & traces_;
 };
 
 }  // namespace seceda::edge

@@ -178,6 +178,7 @@ struct SecedaRequestContext {
     std::string preferred_backend_id;
     std::string preferred_model_alias;
     std::string request_id;
+    std::string transport = "chat_completions";
 };
 
 struct InferenceRequest {
@@ -522,6 +523,29 @@ struct EventBatch {
     std::uint64_t since_id = 0;
     std::uint64_t latest_id = 0;
     std::vector<InferenceEvent> events;
+};
+
+struct PromptTraceEvent {
+    std::uint64_t id = 0;
+    std::uint64_t sequence_number = 0;
+    std::string request_id;
+    std::string transport = "chat_completions";
+    std::string timestamp_utc;
+    std::string phase;
+    std::string item_type;
+    std::string item_id;
+    int content_index = -1;
+    std::string role;
+    std::string tool_name;
+    std::string delta_text;
+    std::string text;
+    std::string payload_json;
+};
+
+struct PromptTraceBatch {
+    std::uint64_t since_id = 0;
+    std::uint64_t latest_id = 0;
+    std::vector<PromptTraceEvent> events;
 };
 
 }  // namespace seceda::edge
