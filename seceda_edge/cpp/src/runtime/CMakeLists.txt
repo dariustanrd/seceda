@@ -1,6 +1,7 @@
 seceda_add_edge_library(
     seceda_edge_runtime
     SOURCES
+        dotenv_load.cpp
         runtime_config.cpp
         request_executor.cpp
         edge_daemon.cpp

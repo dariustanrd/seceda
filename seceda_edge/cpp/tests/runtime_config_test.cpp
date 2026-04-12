@@ -1,5 +1,6 @@
 #include "runtime/runtime_config.hpp"
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -368,6 +369,67 @@ int main() {
 
         std::filesystem::remove(temp_path);
     }
+
+#if !defined(_WIN32)
+    {
+        constexpr const char * kKey = "SECEDA_CLOUD_API_KEY";
+        std::string saved;
+        if (const char * previous = std::getenv(kKey)) {
+            saved = previous;
+        }
+        ::unsetenv(kKey);
+
+        const auto old_cwd = std::filesystem::current_path();
+        const auto temp_root =
+            std::filesystem::temp_directory_path() / "seceda_runtime_config_dotenv_test";
+        std::error_code ec;
+        std::filesystem::remove_all(temp_root, ec);
+        std::filesystem::create_directories(temp_root, ec);
+        {
+            std::ofstream env(temp_root / ".env");
+            env << "SECEDA_CLOUD_API_KEY=from_dotenv_file\n";
+        }
+
+        std::filesystem::current_path(temp_root);
+
+        DaemonConfig config;
+        std::string error;
+        bool show_help = false;
+        std::vector<std::string> args = {
+            "seceda_edge_daemon",
+            "--no-config",
+            "--port",
+            "8080",
+        };
+        auto argv = to_argv(args);
+
+        const bool ok = RuntimeConfigParser::parse(
+            static_cast<int>(argv.size()),
+            argv.data(),
+            config,
+            error,
+            show_help);
+
+        std::filesystem::current_path(old_cwd);
+        std::filesystem::remove_all(temp_root, ec);
+
+        if (!saved.empty()) {
+            ::setenv(kKey, saved.c_str(), 1);
+        } else {
+            ::unsetenv(kKey);
+        }
+
+        if (!require(ok, "parser should accept flags with dotenv-loaded API key")) {
+            return 1;
+        }
+        if (!require(!show_help, "help flag should remain false")) {
+            return 1;
+        }
+        if (!require(config.cloud.api_key == "from_dotenv_file", "dotenv should populate cloud API key")) {
+            return 1;
+        }
+    }
+#endif
 
     return 0;
 }
