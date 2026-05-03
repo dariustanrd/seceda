@@ -1,0 +1,11 @@
+[package]
+name = "seceda-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core request, model, and routing contracts for Seceda."
+
+[lints]
+workspace = true
+

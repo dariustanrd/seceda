@@ -1,0 +1,14 @@
+[package]
+name = "seceda-llama"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "llama.cpp runtime integration scaffold for Seceda."
+
+[dependencies]
+seceda-core = { path = "../seceda-core" }
+
+[lints]
+workspace = true
+

@@ -1,0 +1,18 @@
+[workspace]
+members = [
+    "crates/seceda-core",
+    "crates/seceda-server",
+    "crates/seceda-llama",
+    "crates/seceda-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/dariustanrd/seceda"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+

@@ -17,16 +17,18 @@ The near-term product direction has shifted from a Seceda-specific inference API
 
 ## Current Checkout Reality
 
-The docs describe a larger C++ edge runtime under `seceda_edge/`, a top-level CMake build, vendored `thirdparty/` stacks, shared contracts, and GUI placeholders. In this checkout, the visible files are mainly:
+The current repository has been reconciled around a Rust-first scaffold. The visible first-class areas are:
 
+- `crates/seceda-core/`: shared Rust request, model, and routing contracts.
+- `crates/seceda-server/`: Rust server boundary scaffold for the localhost OpenAI-compatible API.
+- `crates/seceda-llama/`: Rust `llama.cpp` runtime integration scaffold.
+- `crates/seceda-cli/`: Rust CLI entrypoint.
 - `seceda_cloud/`: Python Modal/vLLM serving scaffold.
 - `seceda_tui/`: OpenTUI operator console.
-- `docs/`: plans, architecture notes, use cases, and work log.
+- `docs/`: plans, architecture notes, package layout, use cases, and work log.
 - top-level `README.md`, `pyproject.toml`, `uv.lock`, and `skills-lock.json`.
 
-`git status --short` reports many tracked paths as deleted, including `seceda_edge/`, CMake files, `thirdparty/`, `seceda_shared/`, and `seceda_gui/`. The root `pyproject.toml` still lists `seceda_edge` as a workspace member, so the repository metadata and the current file tree are not fully aligned.
-
-Treat the docs as product and architecture intent, but treat the current checkout as a reduced or transitional implementation state until those deleted paths are restored or the workspace metadata is updated.
+The root `pyproject.toml` now keeps only the existing Python cloud package in the `uv` workspace. Rust workspace membership is managed by the root `Cargo.toml`.
 
 ## Product Objective
 
@@ -210,16 +212,13 @@ Core metrics:
 
 ## Build And Repo Organization Intent
 
-The original repo plan is a mixed native and Python monorepo:
+The current repo plan is a mixed Rust, Python, and TypeScript monorepo:
 
-- C++ edge runtime under `seceda_edge/cpp/`;
+- Rust edge runtime scaffold under `crates/`;
 - Python cloud tooling under `seceda_cloud/`;
-- optional edge-side Python helpers under `seceda_edge/`;
-- shared cross-runtime contracts under `seceda_shared/`;
-- future user-facing tooling under `seceda_gui/`;
-- vendored inference stacks under `thirdparty/`.
+- TypeScript/OpenTUI operator console under `seceda_tui/`.
 
-The root `pyproject.toml` is intended as a `uv` workspace entrypoint. The README also documents CMake presets for native, Apple Silicon, and ARM64 builds, including `llama.cpp`, ExecuTorch, Metal, Vulkan, and cross-compilation paths. Those native build paths depend on files that are currently absent from this checkout.
+The root `Cargo.toml` is the Rust workspace entrypoint. The root `pyproject.toml` remains the `uv` workspace entrypoint for Python packages that actually exist in the checkout.
 
 ## Main Roadmap
 

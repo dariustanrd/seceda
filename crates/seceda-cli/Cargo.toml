@@ -1,0 +1,18 @@
+[package]
+name = "seceda-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CLI entrypoint for the Seceda Rust workspace."
+
+[dependencies]
+seceda-server = { path = "../seceda-server" }
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "seceda"
+path = "src/main.rs"
+
