@@ -260,6 +260,11 @@ pub struct RuntimeCapabilities {
     pub backend: BackendKind,
     pub models: Vec<String>,
     pub supports_streaming: bool,
+    pub supports_tools: bool,
+    pub supports_tool_choice: bool,
+    pub supports_structured_output: bool,
+    pub supports_stateful_responses: bool,
+    pub supports_multimodal_input: bool,
     pub max_context_tokens: Option<usize>,
 }
 
@@ -270,6 +275,11 @@ impl RuntimeCapabilities {
             backend,
             models: Vec::new(),
             supports_streaming: false,
+            supports_tools: false,
+            supports_tool_choice: false,
+            supports_structured_output: false,
+            supports_stateful_responses: false,
+            supports_multimodal_input: false,
             max_context_tokens: None,
         }
     }

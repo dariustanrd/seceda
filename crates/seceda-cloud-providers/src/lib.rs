@@ -5,13 +5,17 @@
 //! should only see portable runtime identifiers, backend kinds, model hints,
 //! and capability metadata.
 
-use seceda_core::{BackendKind, RuntimeCapabilities, RuntimeConfig};
+use seceda_core::{
+    BackendKind, ChatRequest, FinishReason, RuntimeAdapter, RuntimeCapabilities, RuntimeConfig,
+    RuntimeError, RuntimeOutput, RuntimeStreamEvent,
+};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::error::Error;
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Read, Write};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -305,6 +309,322 @@ pub fn current_unix_seconds() -> u64 {
         .as_secs()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexSubscriptionRuntimeAdapter {
+    endpoint: String,
+    credential_store: SecedaCredentialStore,
+    timeout: Duration,
+}
+
+impl CodexSubscriptionRuntimeAdapter {
+    pub fn new(endpoint: impl Into<String>, credential_store: SecedaCredentialStore) -> Self {
+        Self {
+            endpoint: endpoint.into(),
+            credential_store,
+            timeout: Duration::from_secs(30),
+        }
+    }
+
+    pub fn default_endpoint() -> &'static str {
+        "https://chatgpt.com/backend-api/codex/responses"
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    fn post_responses(&self, request: &ChatRequest, stream: bool) -> Result<String, RuntimeError> {
+        let credential = self
+            .credential_store
+            .read_codex_subscription_credential()
+            .map_err(|error| {
+                RuntimeError::new(format!("Codex subscription auth failed: {error}"))
+            })?;
+        let parsed = ParsedHttpEndpoint::parse(&self.endpoint).ok_or_else(|| {
+            RuntimeError::new("Codex subscription endpoint must be an http://host:port URL")
+        })?;
+        let addr = parsed.socket_addr().ok_or_else(|| {
+            RuntimeError::new("Codex subscription endpoint host could not be resolved")
+        })?;
+        let mut tcp = TcpStream::connect_timeout(&addr, self.timeout).map_err(|error| {
+            RuntimeError::new(format!(
+                "failed to connect to Codex subscription backend: {error}"
+            ))
+        })?;
+        let _ = tcp.set_read_timeout(Some(self.timeout));
+        let body = codex_responses_body(request, stream).to_string();
+        let http_request = format!(
+            "POST {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nChatGPT-Account-Id: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            parsed.path,
+            parsed.host_header,
+            credential.access_token,
+            credential.chatgpt_account_id,
+            body.len(),
+            body
+        );
+        tcp.write_all(http_request.as_bytes()).map_err(|error| {
+            RuntimeError::new(format!(
+                "failed to send Codex subscription request: {error}"
+            ))
+        })?;
+
+        let mut response = String::new();
+        tcp.read_to_string(&mut response).map_err(|error| {
+            RuntimeError::new(format!(
+                "failed to read Codex subscription response: {error}"
+            ))
+        })?;
+
+        let status = parse_status_code(&response).unwrap_or(0);
+        if !(200..=299).contains(&status) {
+            return Err(RuntimeError::new(format!(
+                "Codex subscription request failed with HTTP {status}"
+            )));
+        }
+
+        response_body(&response)
+    }
+}
+
+impl RuntimeAdapter for CodexSubscriptionRuntimeAdapter {
+    fn capabilities(&self) -> RuntimeCapabilities {
+        codex_subscription_provider().capabilities()
+    }
+
+    fn execute(&self, request: &ChatRequest) -> Result<RuntimeOutput, RuntimeError> {
+        let body = self.post_responses(request, false)?;
+        parse_codex_response(&body)
+    }
+
+    fn execute_stream(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<Vec<RuntimeStreamEvent>, RuntimeError> {
+        let body = self.post_responses(request, true)?;
+        parse_codex_stream(&body, &request.model)
+    }
+}
+
+fn codex_responses_body(request: &ChatRequest, stream: bool) -> serde_json::Value {
+    let instructions = request.messages.iter().find_map(|message| {
+        (message.role == seceda_core::ChatRole::System).then_some(message.content.as_str())
+    });
+    let input = request
+        .messages
+        .iter()
+        .rev()
+        .find_map(|message| {
+            (message.role == seceda_core::ChatRole::User).then_some(message.content.as_str())
+        })
+        .unwrap_or("");
+    let mut body = serde_json::json!({
+        "model": request.model,
+        "input": input,
+        "stream": stream,
+        "store": false,
+        "include": ["reasoning.encrypted_content"]
+    });
+    if let Some(instructions) = instructions {
+        body["instructions"] = serde_json::Value::String(instructions.to_string());
+    }
+    body
+}
+
+fn parse_codex_response(body: &str) -> Result<RuntimeOutput, RuntimeError> {
+    let value: serde_json::Value = serde_json::from_str(body).map_err(|error| {
+        RuntimeError::new(format!("invalid Codex subscription JSON response: {error}"))
+    })?;
+    let text = response_output_text(&value).ok_or_else(|| {
+        RuntimeError::new("Codex subscription response missing output text content")
+    })?;
+    let model = value["model"]
+        .as_str()
+        .unwrap_or(CODEX_SUBSCRIPTION_MODEL_HINT);
+    Ok(RuntimeOutput {
+        text,
+        model: model.to_string(),
+        finish_reason: FinishReason::Stop,
+    })
+}
+
+fn response_output_text(value: &serde_json::Value) -> Option<String> {
+    value["output"].as_array()?.iter().find_map(|item| {
+        item["content"].as_array()?.iter().find_map(|content| {
+            content["text"]
+                .as_str()
+                .map(ToString::to_string)
+                .or_else(|| content["delta"].as_str().map(ToString::to_string))
+        })
+    })
+}
+
+fn parse_codex_stream(
+    body: &str,
+    fallback_model: &str,
+) -> Result<Vec<RuntimeStreamEvent>, RuntimeError> {
+    let mut events = Vec::new();
+    let mut text = String::new();
+    let mut model = fallback_model.to_string();
+
+    for line in body.lines() {
+        let Some(data) = line.strip_prefix("data: ") else {
+            continue;
+        };
+        if data.trim() == "[DONE]" || data.trim().is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(data).map_err(|error| {
+            RuntimeError::new(format!(
+                "invalid Codex subscription streaming event: {error}"
+            ))
+        })?;
+        if let Some(event_model) = value["response"]["model"].as_str() {
+            model = event_model.to_string();
+        }
+        if events.is_empty() {
+            events.push(RuntimeStreamEvent::Started {
+                model: model.clone(),
+            });
+        }
+        let event_type = value["type"].as_str().unwrap_or_default();
+        match event_type {
+            "response.output_text.delta" | "response.refusal.delta" => {
+                if let Some(delta) = value["delta"].as_str() {
+                    text.push_str(delta);
+                    events.push(RuntimeStreamEvent::TextDelta {
+                        text: delta.to_string(),
+                    });
+                }
+            }
+            "response.completed" => {
+                if let Some(response_model) = value["response"]["model"].as_str() {
+                    model = response_model.to_string();
+                }
+                events.push(RuntimeStreamEvent::Completed {
+                    output: RuntimeOutput {
+                        text: text.clone(),
+                        model: model.clone(),
+                        finish_reason: FinishReason::Stop,
+                    },
+                });
+            }
+            "response.failed" => {
+                let message = value["response"]["error"]["message"]
+                    .as_str()
+                    .unwrap_or("Codex subscription stream failed")
+                    .to_string();
+                events.push(RuntimeStreamEvent::Failed { message });
+            }
+            _ => {}
+        }
+    }
+
+    if events.is_empty() {
+        events.push(RuntimeStreamEvent::Failed {
+            message: "Codex subscription stream did not contain any events".to_string(),
+        });
+    } else if !matches!(
+        events.last(),
+        Some(RuntimeStreamEvent::Completed { .. } | RuntimeStreamEvent::Failed { .. })
+    ) {
+        events.push(RuntimeStreamEvent::Completed {
+            output: RuntimeOutput {
+                text,
+                model,
+                finish_reason: FinishReason::Stop,
+            },
+        });
+    }
+
+    Ok(events)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedHttpEndpoint {
+    host: String,
+    port: u16,
+    path: String,
+    host_header: String,
+}
+
+impl ParsedHttpEndpoint {
+    fn parse(endpoint: &str) -> Option<Self> {
+        let rest = endpoint.strip_prefix("http://")?;
+        let authority = rest.split('/').next().unwrap_or(rest);
+        let path = if rest[authority.len()..].is_empty() {
+            "/backend-api/codex/responses".to_string()
+        } else {
+            rest[authority.len()..].to_string()
+        };
+        let (host, port) = authority.rsplit_once(':')?;
+        let port = port.parse().ok()?;
+        Some(Self {
+            host: host.to_string(),
+            port,
+            path,
+            host_header: authority.to_string(),
+        })
+    }
+
+    fn socket_addr(&self) -> Option<SocketAddr> {
+        (self.host.as_str(), self.port)
+            .to_socket_addrs()
+            .ok()?
+            .next()
+    }
+}
+
+fn parse_status_code(response: &str) -> Option<u16> {
+    response
+        .lines()
+        .next()?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
+
+fn response_body(response: &str) -> Result<String, RuntimeError> {
+    let (headers, body) = response
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| RuntimeError::new("Codex subscription response was malformed"))?;
+
+    if headers.lines().any(|line| {
+        line.to_ascii_lowercase()
+            .starts_with("transfer-encoding: chunked")
+    }) {
+        return decode_chunked_body(body);
+    }
+
+    Ok(body.to_string())
+}
+
+fn decode_chunked_body(mut body: &str) -> Result<String, RuntimeError> {
+    let mut decoded = String::new();
+
+    loop {
+        let (size_line, rest) = body
+            .split_once("\r\n")
+            .ok_or_else(|| RuntimeError::new("malformed chunked Codex subscription response"))?;
+        let size_hex = size_line.split(';').next().unwrap_or(size_line).trim();
+        let size = usize::from_str_radix(size_hex, 16)
+            .map_err(|_| RuntimeError::new("invalid chunk size in Codex subscription response"))?;
+        if size == 0 {
+            break;
+        }
+        if rest.len() < size + 2 {
+            return Err(RuntimeError::new(
+                "truncated chunked Codex subscription response",
+            ));
+        }
+        decoded.push_str(&rest[..size]);
+        body = &rest[size + 2..];
+    }
+
+    Ok(decoded)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,6 +662,113 @@ mod tests {
         assert_eq!(capabilities.runtime_id, MODAL_RUNTIME_ID);
         assert_eq!(capabilities.backend, BackendKind::Cloud);
         assert_eq!(capabilities.models, vec![MODAL_MODEL_HINT.to_string()]);
+    }
+
+    #[test]
+    fn codex_subscription_capabilities_are_conservative() {
+        let capabilities = codex_subscription_provider().capabilities();
+
+        assert_eq!(capabilities.runtime_id, CODEX_SUBSCRIPTION_RUNTIME_ID);
+        assert_eq!(capabilities.backend, BackendKind::Cloud);
+        assert!(capabilities.supports_streaming);
+        assert!(!capabilities.supports_tools);
+        assert!(!capabilities.supports_stateful_responses);
+        assert!(!capabilities.supports_multimodal_input);
+    }
+
+    #[test]
+    fn codex_adapter_sends_auth_and_account_headers() {
+        let store = credential_store_with_valid_credential("headers");
+        let endpoint = spawn_fake_codex_server(
+            |request| {
+                assert!(request.starts_with("POST /backend-api/codex/responses HTTP/1.1"));
+                assert!(request.contains("Authorization: Bearer access-token"));
+                assert!(request.contains("ChatGPT-Account-Id: acct_123"));
+                assert!(request.contains(r#""store":false"#));
+                assert!(request.contains(r#""include":["reasoning.encrypted_content"]"#));
+                assert!(request.contains(r#""input":"hello""#));
+                assert!(request.contains(r#""instructions":"be brief""#));
+                assert!(request.contains(r#""stream":false"#));
+            },
+            r#"{"model":"gpt-5.1-codex","output":[{"content":[{"type":"output_text","text":"cloud text"}]}]}"#,
+        );
+        let adapter = CodexSubscriptionRuntimeAdapter::new(endpoint, store)
+            .with_timeout(Duration::from_secs(1));
+        let request = ChatRequest::new(
+            "seceda/default",
+            vec![
+                seceda_core::ChatMessage::system("be brief"),
+                seceda_core::ChatMessage::user("hello"),
+            ],
+        );
+
+        let output = adapter.execute(&request).expect("codex execution");
+
+        assert_eq!(output.text, "cloud text");
+        assert_eq!(output.model, "gpt-5.1-codex");
+    }
+
+    #[test]
+    fn codex_adapter_streams_text_events() {
+        let store = credential_store_with_valid_credential("stream");
+        let endpoint = spawn_fake_codex_server(
+            |request| {
+                assert!(request.contains(r#""stream":true"#));
+            },
+            concat!(
+                "data: {\"type\":\"response.created\",\"response\":{\"model\":\"gpt-5.1-codex\"}}\n\n",
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"one\"}\n\n",
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\" two\"}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-5.1-codex\"}}\n\n",
+                "data: [DONE]\n\n"
+            ),
+        );
+        let adapter = CodexSubscriptionRuntimeAdapter::new(endpoint, store)
+            .with_timeout(Duration::from_secs(1));
+        let request = ChatRequest::new(
+            "seceda/default",
+            vec![seceda_core::ChatMessage::user("hello")],
+        );
+
+        let events = adapter.execute_stream(&request).expect("codex stream");
+
+        assert_eq!(
+            events,
+            vec![
+                RuntimeStreamEvent::Started {
+                    model: "gpt-5.1-codex".to_string()
+                },
+                RuntimeStreamEvent::TextDelta {
+                    text: "one".to_string()
+                },
+                RuntimeStreamEvent::TextDelta {
+                    text: " two".to_string()
+                },
+                RuntimeStreamEvent::Completed {
+                    output: RuntimeOutput {
+                        text: "one two".to_string(),
+                        model: "gpt-5.1-codex".to_string(),
+                        finish_reason: FinishReason::Stop
+                    }
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_adapter_fails_when_credentials_are_missing() {
+        let store = SecedaCredentialStore::new(test_store_dir("adapter-missing"));
+        let adapter = CodexSubscriptionRuntimeAdapter::new("http://127.0.0.1:1", store)
+            .with_timeout(Duration::from_millis(10));
+        let request = ChatRequest::new(
+            "seceda/default",
+            vec![seceda_core::ChatMessage::user("hello")],
+        );
+
+        let error = adapter.execute(&request).expect_err("missing credential");
+
+        assert!(error.to_string().contains("Codex subscription auth failed"));
+        assert!(error.to_string().contains("missing"));
     }
 
     #[test]
@@ -422,5 +849,41 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&path);
         path
+    }
+
+    fn credential_store_with_valid_credential(name: &str) -> SecedaCredentialStore {
+        let store = SecedaCredentialStore::new(test_store_dir(name));
+        let credential = CodexSubscriptionCredential::new(
+            "access-token",
+            Some("refresh-token"),
+            current_unix_seconds() + 3600,
+            "acct_123",
+        );
+        store
+            .write_codex_subscription_credential(&credential)
+            .expect("credential write");
+        store
+    }
+
+    fn spawn_fake_codex_server(
+        assert_request: impl FnOnce(&str) + Send + 'static,
+        response_body: &'static str,
+    ) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let addr = listener.local_addr().expect("local addr");
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buffer = [0; 8192];
+            let bytes = stream.read(&mut buffer).expect("read");
+            let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+            assert_request(&request);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).expect("write");
+        });
+        format!("http://{addr}/backend-api/codex/responses")
     }
 }

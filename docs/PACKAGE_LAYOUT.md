@@ -87,7 +87,9 @@ model hints, and capability metadata while keeping provider-specific transport
 and auth details outside `seceda-core`. The intended layout is:
 
 - `crates/seceda-cloud-providers/seceda-codex-subscription`: ChatGPT/Codex
-  subscription cloud fallback adapter.
+  subscription cloud fallback adapter. The first adapter path supports
+  Seceda-owned credentials, stateless text Responses calls, streaming text SSE
+  parsing, and conservative capability reporting.
 - `seceda_cloud/`: preserved Python Modal/vLLM cloud runtime package.
 - future cloud providers, such as OpenRouter, should be added as provider
   modules or child crates under the same cloud-provider family.
