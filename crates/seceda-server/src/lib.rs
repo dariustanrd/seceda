@@ -4,18 +4,22 @@ use seceda_core::{
     execute_with_adapters, BackendKind, ChatMessage, ChatRequest, MockRuntimeAdapter,
     ModelDescriptor, RequestFeatures, RuntimeAdapter, SecedaConfig,
 };
+use seceda_llama::{check_sidecar_health_with_timeout, SidecarHealth};
 use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::error::Error;
 use std::fmt;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::process::{Child, Command};
+use std::time::Duration;
 
 /// Minimal server configuration used by the CLI and future HTTP listener.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
     pub bind_host: String,
     pub port: u16,
+    pub llama_sidecar: LlamaSidecarConfig,
 }
 
 impl Default for ServerConfig {
@@ -23,6 +27,7 @@ impl Default for ServerConfig {
         Self {
             bind_host: "127.0.0.1".to_string(),
             port: 8080,
+            llama_sidecar: LlamaSidecarConfig::default(),
         }
     }
 }
@@ -30,6 +35,227 @@ impl Default for ServerConfig {
 impl ServerConfig {
     pub fn listen_addr(&self) -> String {
         format!("{}:{}", self.bind_host, self.port)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlamaSidecarConfig {
+    pub launch_policy: LlamaSidecarLaunchPolicy,
+    pub command: String,
+    pub args: Vec<String>,
+    pub model_path: String,
+    pub host: String,
+    pub port: u16,
+    pub health_path: String,
+}
+
+impl Default for LlamaSidecarConfig {
+    fn default() -> Self {
+        Self {
+            launch_policy: LlamaSidecarLaunchPolicy::Never,
+            command: "llama-server".to_string(),
+            args: Vec::new(),
+            model_path: String::new(),
+            host: "127.0.0.1".to_string(),
+            port: 8081,
+            health_path: "/health".to_string(),
+        }
+    }
+}
+
+impl LlamaSidecarConfig {
+    pub fn endpoint(&self) -> String {
+        format!("http://{}:{}{}", self.host, self.port, self.health_path)
+    }
+
+    fn command_args(&self) -> Vec<String> {
+        if !self.args.is_empty() {
+            return self.args.clone();
+        }
+
+        let mut args = vec![
+            "--host".to_string(),
+            self.host.clone(),
+            "--port".to_string(),
+            self.port.to_string(),
+        ];
+        if !self.model_path.is_empty() {
+            args.push("--model".to_string());
+            args.push(self.model_path.clone());
+        }
+        args
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlamaSidecarLaunchPolicy {
+    Never,
+    IfMissing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlamaSidecarStatus {
+    pub state: LlamaSidecarState,
+    pub endpoint: String,
+    pub pid: Option<u32>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlamaSidecarState {
+    NotConfigured,
+    AlreadyRunning,
+    Launched,
+    FailedLaunch,
+    Stopped,
+}
+
+impl LlamaSidecarState {
+    fn as_str(self) -> &'static str {
+        match self {
+            LlamaSidecarState::NotConfigured => "not-configured",
+            LlamaSidecarState::AlreadyRunning => "already-running",
+            LlamaSidecarState::Launched => "launched",
+            LlamaSidecarState::FailedLaunch => "failed-launch",
+            LlamaSidecarState::Stopped => "stopped",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct LlamaSidecarSupervisor {
+    config: LlamaSidecarConfig,
+    child: RefCell<Option<Child>>,
+    status: RefCell<LlamaSidecarStatus>,
+}
+
+impl LlamaSidecarSupervisor {
+    fn new(config: LlamaSidecarConfig) -> Self {
+        let endpoint = config.endpoint();
+        Self {
+            config,
+            child: RefCell::new(None),
+            status: RefCell::new(LlamaSidecarStatus {
+                state: LlamaSidecarState::NotConfigured,
+                endpoint,
+                pid: None,
+                message: "llama.cpp sidecar has not been checked".to_string(),
+            }),
+        }
+    }
+
+    fn ensure_started(&self) -> LlamaSidecarStatus {
+        if self.config.model_path.trim().is_empty() {
+            return self.update(
+                LlamaSidecarState::NotConfigured,
+                None,
+                "model path is not configured",
+            );
+        }
+
+        if let Some(status) = self.refresh_child_status() {
+            return status;
+        }
+
+        let endpoint = self.config.endpoint();
+        let health = check_sidecar_health_with_timeout(&endpoint, Duration::from_millis(100));
+        if health.health == SidecarHealth::Healthy {
+            return self.update(
+                LlamaSidecarState::AlreadyRunning,
+                None,
+                "llama.cpp sidecar is already running",
+            );
+        }
+
+        if self.config.launch_policy == LlamaSidecarLaunchPolicy::Never {
+            return self.update(
+                LlamaSidecarState::Stopped,
+                None,
+                "llama.cpp sidecar is not running and launch policy is never",
+            );
+        }
+
+        match Command::new(&self.config.command)
+            .args(self.config.command_args())
+            .spawn()
+        {
+            Ok(child) => {
+                let pid = child.id();
+                *self.child.borrow_mut() = Some(child);
+                self.update(
+                    LlamaSidecarState::Launched,
+                    Some(pid),
+                    "llama.cpp sidecar process launched",
+                )
+            }
+            Err(error) => self.update(
+                LlamaSidecarState::FailedLaunch,
+                None,
+                format!("failed to launch llama.cpp sidecar: {error}"),
+            ),
+        }
+    }
+
+    fn status(&self) -> LlamaSidecarStatus {
+        self.refresh_child_status()
+            .unwrap_or_else(|| self.status.borrow().clone())
+    }
+
+    fn refresh_child_status(&self) -> Option<LlamaSidecarStatus> {
+        let mut child = self.child.borrow_mut();
+        let running_pid = child.as_ref().map(Child::id);
+        if let Some(process) = child.as_mut() {
+            match process.try_wait() {
+                Ok(Some(status)) => {
+                    *child = None;
+                    return Some(self.update(
+                        LlamaSidecarState::Stopped,
+                        running_pid,
+                        format!("llama.cpp sidecar exited with {status}"),
+                    ));
+                }
+                Ok(None) => {
+                    return Some(self.update(
+                        LlamaSidecarState::Launched,
+                        running_pid,
+                        "llama.cpp sidecar process is running",
+                    ));
+                }
+                Err(error) => {
+                    return Some(self.update(
+                        LlamaSidecarState::FailedLaunch,
+                        running_pid,
+                        format!("failed to inspect llama.cpp sidecar: {error}"),
+                    ));
+                }
+            }
+        }
+        None
+    }
+
+    fn update(
+        &self,
+        state: LlamaSidecarState,
+        pid: Option<u32>,
+        message: impl Into<String>,
+    ) -> LlamaSidecarStatus {
+        let status = LlamaSidecarStatus {
+            state,
+            endpoint: self.config.endpoint(),
+            pid,
+            message: message.into(),
+        };
+        *self.status.borrow_mut() = status.clone();
+        status
+    }
+}
+
+impl Drop for LlamaSidecarSupervisor {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.borrow_mut().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
@@ -73,9 +299,10 @@ impl From<serde_json::Error> for ServerError {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ServerState {
     pub core_config: SecedaConfig,
+    sidecar: LlamaSidecarSupervisor,
     traces: RefCell<Vec<ObservableEvent>>,
 }
 
@@ -83,14 +310,31 @@ impl Default for ServerState {
     fn default() -> Self {
         Self {
             core_config: SecedaConfig::default(),
+            sidecar: LlamaSidecarSupervisor::new(LlamaSidecarConfig::default()),
             traces: RefCell::new(Vec::new()),
         }
     }
 }
 
 impl ServerState {
+    pub fn new(config: ServerConfig) -> Self {
+        Self {
+            core_config: SecedaConfig::default(),
+            sidecar: LlamaSidecarSupervisor::new(config.llama_sidecar),
+            traces: RefCell::new(Vec::new()),
+        }
+    }
+
     pub fn observed_events(&self) -> Vec<ObservableEvent> {
         self.traces.borrow().clone()
+    }
+
+    pub fn ensure_llama_sidecar(&self) -> LlamaSidecarStatus {
+        self.sidecar.ensure_started()
+    }
+
+    pub fn llama_sidecar_status(&self) -> LlamaSidecarStatus {
+        self.sidecar.status()
     }
 
     fn record(&self, event: ObservableEvent) {
@@ -118,7 +362,9 @@ pub enum ObservableEventKind {
 /// Start the minimal headless server. This call blocks until the listener fails.
 pub fn run_headless(config: ServerConfig) -> Result<(), ServerError> {
     let listener = TcpListener::bind(config.listen_addr())?;
-    serve_listener(listener, ServerState::default())
+    let state = ServerState::new(config);
+    state.ensure_llama_sidecar();
+    serve_listener(listener, state)
 }
 
 pub fn serve_listener(listener: TcpListener, state: ServerState) -> Result<(), ServerError> {
@@ -163,6 +409,18 @@ pub fn handle_http_request(raw: &str, state: &ServerState) -> String {
 
 fn route_http_request(raw: &str, state: &ServerState) -> Result<HttpResponse, OpenAiError> {
     let request = HttpRequest::parse(raw)?;
+
+    if request.path == "/health" || request.path == "/admin/llama-sidecar" {
+        if request.method != "GET" {
+            return Err(OpenAiError::new(
+                405,
+                "invalid_request_error",
+                "method_not_allowed",
+                "GET is required for health/admin routes",
+            ));
+        }
+        return Ok(HttpResponse::json(200, health_json(state)));
+    }
 
     if request.path != "/v1/responses" {
         return Err(OpenAiError::new(
@@ -217,6 +475,19 @@ fn route_http_request(raw: &str, state: &ServerState) -> Result<HttpResponse, Op
 }
 
 const RESPONSE_ID: &str = "resp_mock_0000000000000000";
+
+fn health_json(state: &ServerState) -> Value {
+    let sidecar = state.llama_sidecar_status();
+    json!({
+        "status": "ok",
+        "llama_sidecar": {
+            "state": sidecar.state.as_str(),
+            "endpoint": sidecar.endpoint,
+            "pid": sidecar.pid,
+            "message": sidecar.message
+        }
+    })
+}
 
 fn response_json(id: &str, result: &seceda_core::ExecutionResult) -> Value {
     json!({
@@ -560,6 +831,156 @@ mod tests {
     }
 
     #[test]
+    fn server_config_expresses_llama_sidecar_launch_inputs() {
+        let config = LlamaSidecarConfig {
+            launch_policy: LlamaSidecarLaunchPolicy::IfMissing,
+            command: "fake-llama-server".to_string(),
+            args: vec!["--threads".to_string(), "4".to_string()],
+            model_path: "models/local.gguf".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 18081,
+            health_path: "/health".to_string(),
+        };
+
+        assert_eq!(config.endpoint(), "http://127.0.0.1:18081/health");
+        assert_eq!(config.command_args(), vec!["--threads", "4"]);
+    }
+
+    #[test]
+    fn llama_sidecar_reports_already_running_before_launch() {
+        let endpoint = spawn_fake_health_server(200);
+        let mut config = llama_config_for_endpoint(&endpoint);
+        config.launch_policy = LlamaSidecarLaunchPolicy::IfMissing;
+        config.command = "missing-command-that-should-not-run".to_string();
+        let state = ServerState::new(ServerConfig {
+            llama_sidecar: config,
+            ..ServerConfig::default()
+        });
+
+        let status = state.ensure_llama_sidecar();
+
+        assert_eq!(status.state, LlamaSidecarState::AlreadyRunning);
+        assert_eq!(status.pid, None);
+    }
+
+    #[test]
+    fn llama_sidecar_launches_when_missing_and_allowed() {
+        let config = LlamaSidecarConfig {
+            launch_policy: LlamaSidecarLaunchPolicy::IfMissing,
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), "sleep 5".to_string()],
+            model_path: "models/local.gguf".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: unused_port(),
+            health_path: "/health".to_string(),
+        };
+        let state = ServerState::new(ServerConfig {
+            llama_sidecar: config,
+            ..ServerConfig::default()
+        });
+
+        let status = state.ensure_llama_sidecar();
+
+        assert_eq!(status.state, LlamaSidecarState::Launched);
+        assert!(status.pid.is_some());
+    }
+
+    #[test]
+    fn llama_sidecar_reports_stopped_after_launched_process_exits() {
+        let config = LlamaSidecarConfig {
+            launch_policy: LlamaSidecarLaunchPolicy::IfMissing,
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), "exit 0".to_string()],
+            model_path: "models/local.gguf".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: unused_port(),
+            health_path: "/health".to_string(),
+        };
+        let state = ServerState::new(ServerConfig {
+            llama_sidecar: config,
+            ..ServerConfig::default()
+        });
+
+        let launched = state.ensure_llama_sidecar();
+        let stopped = wait_for_stopped_sidecar(&state);
+
+        assert_eq!(launched.state, LlamaSidecarState::Launched);
+        assert_eq!(stopped.state, LlamaSidecarState::Stopped);
+        assert!(stopped.message.contains("exited"));
+    }
+
+    #[test]
+    fn llama_sidecar_reports_failed_launch() {
+        let config = LlamaSidecarConfig {
+            launch_policy: LlamaSidecarLaunchPolicy::IfMissing,
+            command: "missing-seceda-llama-command".to_string(),
+            args: Vec::new(),
+            model_path: "models/local.gguf".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: unused_port(),
+            health_path: "/health".to_string(),
+        };
+        let state = ServerState::new(ServerConfig {
+            llama_sidecar: config,
+            ..ServerConfig::default()
+        });
+
+        let status = state.ensure_llama_sidecar();
+
+        assert_eq!(status.state, LlamaSidecarState::FailedLaunch);
+        assert!(status.message.contains("failed to launch"));
+    }
+
+    #[test]
+    fn llama_sidecar_reports_stopped_when_launch_disabled() {
+        let config = LlamaSidecarConfig {
+            launch_policy: LlamaSidecarLaunchPolicy::Never,
+            command: "llama-server".to_string(),
+            args: Vec::new(),
+            model_path: "models/local.gguf".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: unused_port(),
+            health_path: "/health".to_string(),
+        };
+        let state = ServerState::new(ServerConfig {
+            llama_sidecar: config,
+            ..ServerConfig::default()
+        });
+
+        let status = state.ensure_llama_sidecar();
+
+        assert_eq!(status.state, LlamaSidecarState::Stopped);
+    }
+
+    #[test]
+    fn health_route_reports_llama_sidecar_status() {
+        let state = ServerState::new(ServerConfig {
+            llama_sidecar: LlamaSidecarConfig {
+                launch_policy: LlamaSidecarLaunchPolicy::Never,
+                command: "llama-server".to_string(),
+                args: Vec::new(),
+                model_path: "models/local.gguf".to_string(),
+                host: "127.0.0.1".to_string(),
+                port: unused_port(),
+                health_path: "/health".to_string(),
+            },
+            ..ServerConfig::default()
+        });
+        state.ensure_llama_sidecar();
+        let raw = http_request("GET", "/admin/llama-sidecar", "");
+
+        let response = handle_http_request(&raw, &state);
+        let value: Value = serde_json::from_str(response_body(&response)).expect("json response");
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert_eq!(value["llama_sidecar"]["state"], "stopped");
+        assert!(value["llama_sidecar"]["endpoint"]
+            .as_str()
+            .expect("endpoint")
+            .starts_with("http://127.0.0.1:"));
+    }
+
+    #[test]
     fn default_model_aliases_are_available() {
         let models = default_models();
 
@@ -728,5 +1149,54 @@ mod tests {
         body.lines()
             .filter_map(|line| line.strip_prefix("event: "))
             .collect()
+    }
+
+    fn spawn_fake_health_server(status: u16) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let addr = listener.local_addr().expect("local addr");
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buffer = [0; 512];
+            let _ = stream.read(&mut buffer);
+            let status_text = if status == 200 { "OK" } else { "Unavailable" };
+            let response = format!(
+                "HTTP/1.1 {status} {status_text}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+            );
+            stream.write_all(response.as_bytes()).expect("write");
+        });
+        format!("http://{addr}/health")
+    }
+
+    fn llama_config_for_endpoint(endpoint: &str) -> LlamaSidecarConfig {
+        let rest = endpoint
+            .strip_prefix("http://")
+            .expect("test endpoint uses http");
+        let (authority, path) = rest.split_once('/').expect("test endpoint path");
+        let (host, port) = authority.rsplit_once(':').expect("host port");
+        LlamaSidecarConfig {
+            launch_policy: LlamaSidecarLaunchPolicy::Never,
+            command: "llama-server".to_string(),
+            args: Vec::new(),
+            model_path: "models/local.gguf".to_string(),
+            host: host.to_string(),
+            port: port.parse().expect("port"),
+            health_path: format!("/{path}"),
+        }
+    }
+
+    fn unused_port() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        listener.local_addr().expect("local addr").port()
+    }
+
+    fn wait_for_stopped_sidecar(state: &ServerState) -> LlamaSidecarStatus {
+        for _ in 0..20 {
+            let status = state.llama_sidecar_status();
+            if status.state == LlamaSidecarState::Stopped {
+                return status;
+            }
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        state.llama_sidecar_status()
     }
 }

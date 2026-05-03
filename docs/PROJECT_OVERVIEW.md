@@ -54,6 +54,9 @@ completion events internally.
 The llama.cpp runtime package currently covers setup diagnostics: discovering a
 `llama-server` binary on `PATH`, checking an HTTP sidecar endpoint, and
 reporting runtime capabilities in the core adapter shape.
+The server owns sidecar supervision: configured llama.cpp endpoints are checked
+before launch, configured commands can be started when policy allows, and
+health/admin output exposes the lifecycle state.
 
 
 ## Product Objective

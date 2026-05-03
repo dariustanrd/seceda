@@ -73,6 +73,11 @@ creation, text delta, completion, and final response completion.
 `seceda-llama` currently supports sidecar setup checks without native
 llama.cpp bindings: `llama-server` discovery on `PATH`, HTTP sidecar health
 checks, and capability metadata in the shape expected by `seceda-core`.
+`seceda-server` owns the sidecar lifecycle boundary: server config can describe
+the launch policy, command, model path, host, and port; startup checks an
+existing endpoint first; and `/health` plus `/admin/llama-sidecar` report
+whether the sidecar is not configured, already running, launched, failed to
+launch, or stopped.
 
 
 ## Preserved Cloud Package
