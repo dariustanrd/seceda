@@ -60,6 +60,12 @@ export interface ReloadModelResponse {
   error?: string;
 }
 
+export interface CodexSubscriptionLoginResponse {
+  ok: boolean;
+  auth_url?: string;
+  message?: string;
+}
+
 function encodeQuery(params: Record<string, string | number | undefined>): string {
   const query = new URLSearchParams();
 
@@ -254,6 +260,16 @@ export class SecedaApi {
         warmup_prompt: warmupPrompt,
       }),
     });
+  }
+
+  async startCodexSubscriptionLogin(): Promise<CodexSubscriptionLoginResponse> {
+    return this.fetchJson<CodexSubscriptionLoginResponse>(
+      "/admin/cloud/codex-subscription/login",
+      {
+        method: "POST",
+        body: JSON.stringify({ provider: "cloud/codex-subscription" }),
+      },
+    );
   }
 }
 
