@@ -2,6 +2,7 @@
 
 #include "runtime/interfaces.hpp"
 #include "telemetry/metrics_registry.hpp"
+#include "telemetry/request_trace_recorder.hpp"
 #include "telemetry/trace_registry.hpp"
 
 namespace seceda::edge {
@@ -47,6 +48,7 @@ private:
     IRouter & router_;
     MetricsRegistry & metrics_;
     TraceRegistry & traces_;
+    RequestTraceRecorder trace_recorder_;
 };
 
 }  // namespace seceda::edge
