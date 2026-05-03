@@ -79,7 +79,10 @@ checks, and capability metadata in the shape expected by `seceda-core`.
 the launch policy, command, model path, host, and port; startup checks an
 existing endpoint first; and `/health` plus `/admin/llama-sidecar` report
 whether the sidecar is not configured, already running, launched, failed to
-launch, or stopped.
+launch, or stopped. The server also exposes `/admin/cloud-fallback` so setup
+surfaces can select `cloud/codex-subscription`, `remote/modal-default`, or
+`local-only`; the selected provider is applied to the core runtime config
+without adding provider details to public OpenAI responses.
 
 Cloud provider runtime details live under `crates/seceda-cloud-providers`.
 The cloud provider family exposes provider descriptors, runtime identifiers,

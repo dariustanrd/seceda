@@ -64,6 +64,7 @@ dependencies = [
 name = "seceda-server"
 version = "0.1.0"
 dependencies = [
+ "seceda-cloud-providers",
  "seceda-core",
  "seceda-llama",
  "serde_json",

@@ -126,7 +126,9 @@ impl SecedaConfig {
             return Err(ConfigError::MissingDefaultRuntime("local"));
         }
 
-        if self.router.default_cloud_runtime_id.trim().is_empty() {
+        if self.router.cloud_fallback_enabled
+            && self.router.default_cloud_runtime_id.trim().is_empty()
+        {
             return Err(ConfigError::MissingDefaultRuntime("cloud"));
         }
 
@@ -137,7 +139,8 @@ impl SecedaConfig {
         }
 
         let cloud = self.runtime(&self.router.default_cloud_runtime_id);
-        if !matches!(cloud, Some(runtime) if runtime.enabled && runtime.backend == BackendKind::Cloud)
+        if self.router.cloud_fallback_enabled
+            && !matches!(cloud, Some(runtime) if runtime.enabled && runtime.backend == BackendKind::Cloud)
         {
             return Err(ConfigError::MissingDefaultRuntime("cloud"));
         }
@@ -157,6 +160,7 @@ impl SecedaConfig {
 pub struct RouterConfig {
     pub default_local_runtime_id: String,
     pub default_cloud_runtime_id: String,
+    pub cloud_fallback_enabled: bool,
     pub prompt_char_limit: usize,
     pub estimated_prompt_token_limit: usize,
     pub structured_output_keywords: Vec<String>,
@@ -169,6 +173,7 @@ impl Default for RouterConfig {
         Self {
             default_local_runtime_id: "local/llama.cpp".to_string(),
             default_cloud_runtime_id: "remote/modal-default".to_string(),
+            cloud_fallback_enabled: true,
             prompt_char_limit: 800,
             estimated_prompt_token_limit: 256,
             structured_output_keywords: vec![

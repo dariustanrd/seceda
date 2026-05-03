@@ -1,5 +1,8 @@
 //! Server boundary for Seceda's OpenAI-compatible localhost API.
 
+use seceda_cloud_providers::{
+    codex_subscription_provider, modal_provider, CODEX_SUBSCRIPTION_RUNTIME_ID, MODAL_RUNTIME_ID,
+};
 use seceda_core::{
     execute_with_adapters, stream_with_adapters, BackendKind, ChatMessage, ChatRequest,
     MockRuntimeAdapter, ModelDescriptor, RequestFeatures, RuntimeAdapter, RuntimeStreamEvent,
@@ -21,6 +24,7 @@ pub struct ServerConfig {
     pub bind_host: String,
     pub port: u16,
     pub llama_sidecar: LlamaSidecarConfig,
+    pub cloud_fallback: CloudFallbackSelection,
 }
 
 impl Default for ServerConfig {
@@ -29,8 +33,80 @@ impl Default for ServerConfig {
             bind_host: "127.0.0.1".to_string(),
             port: 8080,
             llama_sidecar: LlamaSidecarConfig::default(),
+            cloud_fallback: CloudFallbackSelection::Modal,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloudFallbackSelection {
+    CodexSubscription,
+    Modal,
+    LocalOnly,
+}
+
+impl CloudFallbackSelection {
+    pub fn runtime_id(self) -> Option<&'static str> {
+        match self {
+            CloudFallbackSelection::CodexSubscription => Some(CODEX_SUBSCRIPTION_RUNTIME_ID),
+            CloudFallbackSelection::Modal => Some(MODAL_RUNTIME_ID),
+            CloudFallbackSelection::LocalOnly => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CloudFallbackSelection::CodexSubscription => "cloud/codex-subscription",
+            CloudFallbackSelection::Modal => "remote/modal-default",
+            CloudFallbackSelection::LocalOnly => "local-only",
+        }
+    }
+
+    pub fn from_request_value(value: &str) -> Option<Self> {
+        match value {
+            "cloud/codex-subscription" | "codex-subscription" => {
+                Some(CloudFallbackSelection::CodexSubscription)
+            }
+            "remote/modal-default" | "modal" => Some(CloudFallbackSelection::Modal),
+            "local-only" => Some(CloudFallbackSelection::LocalOnly),
+            _ => None,
+        }
+    }
+}
+
+fn core_config_for_cloud_selection(selection: CloudFallbackSelection) -> SecedaConfig {
+    let mut config = SecedaConfig::default();
+    config.runtimes.retain(|runtime| {
+        runtime.id != CODEX_SUBSCRIPTION_RUNTIME_ID && runtime.id != MODAL_RUNTIME_ID
+    });
+
+    match selection {
+        CloudFallbackSelection::CodexSubscription => {
+            config.router.default_cloud_runtime_id = CODEX_SUBSCRIPTION_RUNTIME_ID.to_string();
+            config.router.cloud_fallback_enabled = true;
+            config
+                .runtimes
+                .push(codex_subscription_provider().runtime_config(true));
+            config.runtimes.push(modal_provider().runtime_config(false));
+        }
+        CloudFallbackSelection::Modal => {
+            config.router.default_cloud_runtime_id = MODAL_RUNTIME_ID.to_string();
+            config.router.cloud_fallback_enabled = true;
+            config.runtimes.push(modal_provider().runtime_config(true));
+            config
+                .runtimes
+                .push(codex_subscription_provider().runtime_config(false));
+        }
+        CloudFallbackSelection::LocalOnly => {
+            config.router.cloud_fallback_enabled = false;
+            config.runtimes.push(modal_provider().runtime_config(false));
+            config
+                .runtimes
+                .push(codex_subscription_provider().runtime_config(false));
+        }
+    }
+
+    config
 }
 
 impl ServerConfig {
@@ -266,6 +342,7 @@ pub fn default_models() -> Vec<ModelDescriptor> {
         ModelDescriptor::new("seceda/default", BackendKind::Local),
         ModelDescriptor::new("local/default", BackendKind::Local),
         ModelDescriptor::new("remote/default", BackendKind::Cloud),
+        ModelDescriptor::new("codex-subscription/default", BackendKind::Cloud),
     ]
 }
 
@@ -302,7 +379,8 @@ impl From<serde_json::Error> for ServerError {
 
 #[derive(Debug)]
 pub struct ServerState {
-    pub core_config: SecedaConfig,
+    core_config: RefCell<SecedaConfig>,
+    cloud_fallback: RefCell<CloudFallbackSelection>,
     sidecar: LlamaSidecarSupervisor,
     traces: RefCell<Vec<ObservableEvent>>,
 }
@@ -310,7 +388,10 @@ pub struct ServerState {
 impl Default for ServerState {
     fn default() -> Self {
         Self {
-            core_config: SecedaConfig::default(),
+            core_config: RefCell::new(core_config_for_cloud_selection(
+                CloudFallbackSelection::Modal,
+            )),
+            cloud_fallback: RefCell::new(CloudFallbackSelection::Modal),
             sidecar: LlamaSidecarSupervisor::new(LlamaSidecarConfig::default()),
             traces: RefCell::new(Vec::new()),
         }
@@ -320,10 +401,24 @@ impl Default for ServerState {
 impl ServerState {
     pub fn new(config: ServerConfig) -> Self {
         Self {
-            core_config: SecedaConfig::default(),
+            core_config: RefCell::new(core_config_for_cloud_selection(config.cloud_fallback)),
+            cloud_fallback: RefCell::new(config.cloud_fallback),
             sidecar: LlamaSidecarSupervisor::new(config.llama_sidecar),
             traces: RefCell::new(Vec::new()),
         }
+    }
+
+    pub fn core_config(&self) -> SecedaConfig {
+        self.core_config.borrow().clone()
+    }
+
+    pub fn cloud_fallback(&self) -> CloudFallbackSelection {
+        *self.cloud_fallback.borrow()
+    }
+
+    pub fn set_cloud_fallback(&self, selection: CloudFallbackSelection) {
+        *self.cloud_fallback.borrow_mut() = selection;
+        *self.core_config.borrow_mut() = core_config_for_cloud_selection(selection);
     }
 
     pub fn observed_events(&self) -> Vec<ObservableEvent> {
@@ -423,6 +518,49 @@ fn route_http_request(raw: &str, state: &ServerState) -> Result<HttpResponse, Op
         return Ok(HttpResponse::json(200, health_json(state)));
     }
 
+    if request.path == "/admin/cloud-fallback" {
+        if request.method == "GET" {
+            return Ok(HttpResponse::json(200, cloud_fallback_json(state)));
+        }
+        if request.method != "POST" {
+            return Err(OpenAiError::new(
+                405,
+                "invalid_request_error",
+                "method_not_allowed",
+                "GET or POST is required for /admin/cloud-fallback",
+            ));
+        }
+        let body: Value = serde_json::from_str(&request.body).map_err(|_| {
+            OpenAiError::new(
+                400,
+                "invalid_request_error",
+                "invalid_json",
+                "request body must be valid JSON",
+            )
+        })?;
+        let provider = body
+            .get("provider")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                OpenAiError::new(
+                    400,
+                    "invalid_request_error",
+                    "missing_provider",
+                    "cloud fallback selection requires provider",
+                )
+            })?;
+        let selection = CloudFallbackSelection::from_request_value(provider).ok_or_else(|| {
+            OpenAiError::new(
+                400,
+                "invalid_request_error",
+                "unsupported_cloud_provider",
+                "unsupported cloud fallback provider",
+            )
+        })?;
+        state.set_cloud_fallback(selection);
+        return Ok(HttpResponse::json(200, cloud_fallback_json(state)));
+    }
+
     if request.path != "/v1/responses" {
         return Err(OpenAiError::new(
             404,
@@ -452,20 +590,25 @@ fn route_http_request(raw: &str, state: &ServerState) -> Result<HttpResponse, Op
     let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let core_request = responses_request_to_core(&body)?;
     let local = LlamaRuntimeAdapter::new(state.llama_sidecar_status().endpoint);
-    let cloud = MockRuntimeAdapter::new("remote/modal-default", BackendKind::Cloud);
-    let adapters: [&dyn RuntimeAdapter; 2] = [&local, &cloud];
+    let modal_cloud = MockRuntimeAdapter::new(MODAL_RUNTIME_ID, BackendKind::Cloud);
+    let codex_cloud = MockRuntimeAdapter::new(CODEX_SUBSCRIPTION_RUNTIME_ID, BackendKind::Cloud);
+    let adapters: Vec<&dyn RuntimeAdapter> = match state.cloud_fallback() {
+        CloudFallbackSelection::CodexSubscription => vec![&local, &codex_cloud],
+        CloudFallbackSelection::Modal => vec![&local, &modal_cloud],
+        CloudFallbackSelection::LocalOnly => vec![&local],
+    };
+    let core_config = state.core_config();
 
     if stream {
-        let result = stream_with_adapters(&state.core_config, &core_request, &adapters).map_err(
-            |error| {
+        let result =
+            stream_with_adapters(&core_config, &core_request, &adapters).map_err(|error| {
                 OpenAiError::new(
                     500,
                     "server_error",
                     "core_execution_failed",
                     error.to_string(),
                 )
-            },
-        )?;
+            })?;
         record_stream_trace_events(state, RESPONSE_ID, &result);
 
         return Ok(HttpResponse::sse(
@@ -475,7 +618,7 @@ fn route_http_request(raw: &str, state: &ServerState) -> Result<HttpResponse, Op
     }
 
     let result =
-        execute_with_adapters(&state.core_config, &core_request, &adapters).map_err(|error| {
+        execute_with_adapters(&core_config, &core_request, &adapters).map_err(|error| {
             OpenAiError::new(
                 500,
                 "server_error",
@@ -500,6 +643,30 @@ fn health_json(state: &ServerState) -> Value {
             "pid": sidecar.pid,
             "message": sidecar.message
         }
+    })
+}
+
+fn cloud_fallback_json(state: &ServerState) -> Value {
+    let selection = state.cloud_fallback();
+    let core_config = state.core_config();
+    json!({
+        "provider": selection.as_str(),
+        "enabled": selection != CloudFallbackSelection::LocalOnly,
+        "default_cloud_runtime_id": core_config.router.default_cloud_runtime_id,
+        "available": [
+            {
+                "provider": "cloud/codex-subscription",
+                "label": "Codex Subscription"
+            },
+            {
+                "provider": "remote/modal-default",
+                "label": "Modal"
+            },
+            {
+                "provider": "local-only",
+                "label": "Local only"
+            }
+        ]
     })
 }
 
@@ -1181,6 +1348,107 @@ mod tests {
         assert_eq!(
             value["output"][0]["content"][0]["text"],
             "remote/modal-default response: hello"
+        );
+        assert!(value.get("routing").is_none());
+    }
+
+    #[test]
+    fn cloud_fallback_admin_selects_codex_subscription() {
+        let state = ServerState::default();
+        let raw = http_request(
+            "POST",
+            "/admin/cloud-fallback",
+            r#"{"provider":"cloud/codex-subscription"}"#,
+        );
+
+        let response = handle_http_request(&raw, &state);
+        let value: Value = serde_json::from_str(response_body(&response)).expect("json response");
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert_eq!(
+            state.cloud_fallback(),
+            CloudFallbackSelection::CodexSubscription
+        );
+        assert_eq!(value["provider"], "cloud/codex-subscription");
+        assert_eq!(
+            value["default_cloud_runtime_id"],
+            "cloud/codex-subscription"
+        );
+        assert_eq!(
+            state.core_config().router.default_cloud_runtime_id,
+            "cloud/codex-subscription"
+        );
+    }
+
+    #[test]
+    fn cloud_fallback_admin_selects_modal() {
+        let state = ServerState::new(ServerConfig {
+            cloud_fallback: CloudFallbackSelection::CodexSubscription,
+            ..ServerConfig::default()
+        });
+        let raw = http_request(
+            "POST",
+            "/admin/cloud-fallback",
+            r#"{"provider":"remote/modal-default"}"#,
+        );
+
+        let response = handle_http_request(&raw, &state);
+        let value: Value = serde_json::from_str(response_body(&response)).expect("json response");
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert_eq!(state.cloud_fallback(), CloudFallbackSelection::Modal);
+        assert_eq!(value["provider"], "remote/modal-default");
+        assert_eq!(value["default_cloud_runtime_id"], "remote/modal-default");
+    }
+
+    #[test]
+    fn cloud_fallback_admin_selects_local_only_without_breaking_local_route() {
+        let state = server_state_with_fake_llama("local only response");
+        let select_raw = http_request(
+            "POST",
+            "/admin/cloud-fallback",
+            r#"{"provider":"local-only"}"#,
+        );
+        let request_raw = http_request(
+            "POST",
+            "/v1/responses",
+            r#"{"model":"seceda/default","input":"hello"}"#,
+        );
+
+        let select_response = handle_http_request(&select_raw, &state);
+        let response = handle_http_request(&request_raw, &state);
+        let select_value: Value =
+            serde_json::from_str(response_body(&select_response)).expect("json response");
+        let value: Value = serde_json::from_str(response_body(&response)).expect("json response");
+
+        assert_eq!(state.cloud_fallback(), CloudFallbackSelection::LocalOnly);
+        assert_eq!(select_value["enabled"], false);
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert_eq!(
+            value["output"][0]["content"][0]["text"],
+            "local only response"
+        );
+    }
+
+    #[test]
+    fn codex_subscription_selection_routes_cloud_requests_to_selected_runtime() {
+        let state = ServerState::new(ServerConfig {
+            cloud_fallback: CloudFallbackSelection::CodexSubscription,
+            ..ServerConfig::default()
+        });
+        let raw = http_request(
+            "POST",
+            "/v1/responses",
+            r#"{"model":"seceda/default","input":"hello","tools":[]}"#,
+        );
+
+        let response = handle_http_request(&raw, &state);
+        let value: Value = serde_json::from_str(response_body(&response)).expect("json response");
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert_eq!(
+            value["output"][0]["content"][0]["text"],
+            "cloud/codex-subscription response: hello"
         );
         assert!(value.get("routing").is_none());
     }
