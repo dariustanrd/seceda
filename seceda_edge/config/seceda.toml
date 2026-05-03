@@ -150,7 +150,7 @@ n_threads_batch = -1
 [remote]
 # The default named remote backend used when routing to cloud without a more
 # specific alias or backend hint.
-default_backend = "modal-default"
+default_backend = "nscale-default"
 
 [remote.backends.modal-default]
 backend_id = "remote/modal-default"
@@ -183,21 +183,21 @@ verify_tls = true
 # Example alternate backend profile. Uncomment when you want multiple named
 # remote targets that can be selected by alias or future UI controls.
 #
-#[remote.backends.alt]
-#backend_id = "remote/alt"
-#model = "remote-alt-model"
-#model_alias = "remote/alt"
-#display_name = "Alternate remote backend"
-#execution_mode = "remote_service"
-#capabilities = ["chat.completions", "text", "stream", "tools", "response_format"]
-#base_url = "https://example-alt/v1"
-#api_key = ""
-#timeout_seconds = 120
-#connect_timeout_seconds = 10
-#retry_attempts = 2
-#retry_backoff_ms = 1000
-#send_modal_session_id = false
-#verify_tls = true
+[remote.backends.nscale-default]
+backend_id = "remote/nscale-default"
+model = "Qwen/Qwen3-235B-A22B-Instruct-2507"
+model_alias = "Qwen/Qwen3-235B-A22B-Instruct-2507"
+display_name = "Nscale remote backend"
+execution_mode = "remote_service"
+capabilities = ["chat.completions", "text", "stream", "tools", "response_format"]
+base_url = "https://inference.api.nscale.com/v1"
+# api_key = "${NSCALE_TOKEN}"
+timeout_seconds = 120
+connect_timeout_seconds = 10
+retry_attempts = 2
+retry_backoff_ms = 1000
+send_modal_session_id = false
+verify_tls = true
 
 [observability]
 # Number of recent inference events retained in memory for /metrics/events.
@@ -235,8 +235,8 @@ id = "remote/default"
 display_name = "Seceda remote backend"
 owned_by = "seceda"
 route_target = "cloud"
-backend_id = "remote/modal-default"
-model_id = "seceda-cloud-default"
-model_alias = "remote/default"
+backend_id = "remote/nscale-default"
+model_id = "Qwen/Qwen3-235B-A22B-Instruct-2507"
+model_alias = "Qwen/Qwen3-235B-A22B-Instruct-2507"
 execution_mode = "remote_service"
 capabilities = ["chat.completions", "text", "stream", "tools", "response_format"]

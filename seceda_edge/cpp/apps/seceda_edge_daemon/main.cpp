@@ -8,9 +8,15 @@
 #include <cpp-httplib/httplib.h>
 #include <nlohmann/json.hpp>
 
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
+#include <deque>
+#include <functional>
 #include <iostream>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -206,6 +212,52 @@ json event_to_json(const InferenceEvent & event) {
     return payload;
 }
 
+json trace_event_to_json(const PromptTraceEvent & event) {
+    json payload = {
+        {"id", event.id},
+        {"sequence_number", event.sequence_number},
+        {"request_id", event.request_id},
+        {"transport", event.transport},
+        {"timestamp_utc", event.timestamp_utc},
+        {"phase", event.phase},
+        {"item_type", event.item_type},
+        {"item_id", event.item_id},
+        {"content_index", event.content_index >= 0 ? json(event.content_index) : json(nullptr)},
+        {"role", event.role},
+        {"tool_name", event.tool_name},
+        {"delta_text", event.delta_text},
+        {"text", event.text},
+    };
+
+    if (!event.payload_json.empty()) {
+        try {
+            payload["payload"] = json::parse(event.payload_json);
+        } catch (const std::exception &) {
+            payload["payload_json"] = event.payload_json;
+        }
+    }
+
+    return payload;
+}
+
+std::string trace_event_sse(const PromptTraceEvent & event) {
+    return "event: trace\ndata: " + trace_event_to_json(event).dump() + "\n\n";
+}
+
+std::string trace_keepalive_sse() {
+    return ": keepalive\n\n";
+}
+
+struct TraceStreamState {
+    EdgeDaemon * daemon = nullptr;
+    std::function<bool()> is_connection_closed;
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::deque<PromptTraceEvent> pending_events;
+    std::uint64_t subscriber_token = 0;
+    bool closed = false;
+};
+
 bool parse_query_uint64(
     const httplib::Request & request,
     const char * key,
@@ -301,6 +353,136 @@ int main(int argc, char ** argv) {
         }
 
         response.set_content(payload.dump(2), "application/json");
+    });
+
+    server.Get("/trace/events", [&](const httplib::Request & request, httplib::Response & response) {
+        std::string error;
+        std::uint64_t since_id = 0;
+        std::uint64_t limit = 2000;
+        const std::string request_id =
+            request.has_param("request_id") ? request.get_param_value("request_id") : std::string{};
+        if (!parse_query_uint64(request, "since_id", 0, since_id, error) ||
+            !parse_query_uint64(request, "limit", 2000, limit, error)) {
+            response.status = 400;
+            response.set_content(json{{"ok", false}, {"error", error}}.dump(2), "application/json");
+            return;
+        }
+
+        const auto batch = daemon.trace_events(since_id, static_cast<std::size_t>(limit), request_id);
+        json payload = {
+            {"since_id", batch.since_id},
+            {"latest_id", batch.latest_id},
+            {"returned", batch.events.size()},
+            {"events", json::array()},
+        };
+        if (!request_id.empty()) {
+            payload["request_id"] = request_id;
+        }
+        for (const auto & event : batch.events) {
+            payload["events"].push_back(trace_event_to_json(event));
+        }
+
+        response.set_content(payload.dump(2), "application/json");
+    });
+
+    server.Get("/trace/stream", [&](const httplib::Request & request, httplib::Response & response) {
+        std::string error;
+        std::uint64_t since_id = 0;
+        const std::string request_id =
+            request.has_param("request_id") ? request.get_param_value("request_id") : std::string{};
+        if (!parse_query_uint64(request, "since_id", 0, since_id, error)) {
+            response.status = 400;
+            response.set_content(json{{"ok", false}, {"error", error}}.dump(2), "application/json");
+            return;
+        }
+
+        auto state = std::make_shared<TraceStreamState>();
+        state->daemon = &daemon;
+        state->is_connection_closed = request.is_connection_closed;
+
+        const auto backlog = daemon.trace_events(since_id, 2000, request_id);
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            for (const auto & event : backlog.events) {
+                state->pending_events.push_back(event);
+            }
+        }
+
+        state->subscriber_token = daemon.subscribe_traces(
+            request_id,
+            [weak_state = std::weak_ptr<TraceStreamState>(state)](const PromptTraceEvent & event) {
+                const auto locked = weak_state.lock();
+                if (!locked) {
+                    return;
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(locked->mutex);
+                    if (locked->closed) {
+                        return;
+                    }
+                    locked->pending_events.push_back(event);
+                }
+                locked->cv.notify_one();
+            });
+
+        response.set_header("Cache-Control", "no-cache");
+        response.set_header("Connection", "keep-alive");
+        response.set_chunked_content_provider(
+            "text/event-stream",
+            [state](std::size_t offset, httplib::DataSink & sink) {
+                if (offset != 0) {
+                    sink.done();
+                    return true;
+                }
+
+                while (true) {
+                    PromptTraceEvent event;
+                    bool have_event = false;
+                    {
+                        std::unique_lock<std::mutex> lock(state->mutex);
+                        if (state->pending_events.empty() && !state->closed) {
+                            state->cv.wait_for(lock, std::chrono::seconds(1), [&]() {
+                                return state->closed || !state->pending_events.empty();
+                            });
+                        }
+
+                        if (!state->pending_events.empty()) {
+                            event = std::move(state->pending_events.front());
+                            state->pending_events.pop_front();
+                            have_event = true;
+                        }
+                    }
+
+                    if (state->closed || state->is_connection_closed()) {
+                        break;
+                    }
+
+                    if (have_event) {
+                        const auto chunk = trace_event_sse(event);
+                        if (!sink.write(chunk.data(), chunk.size())) {
+                            break;
+                        }
+                        continue;
+                    }
+
+                    const auto keepalive = trace_keepalive_sse();
+                    if (!sink.write(keepalive.data(), keepalive.size())) {
+                        break;
+                    }
+                }
+
+                sink.done();
+                return true;
+            },
+            [state](bool) {
+                {
+                    std::lock_guard<std::mutex> lock(state->mutex);
+                    state->closed = true;
+                }
+                state->daemon->unsubscribe_traces(state->subscriber_token);
+                state->cv.notify_all();
+            });
     });
 
     server.Get("/v1/models", [&](const httplib::Request &, httplib::Response & response) {

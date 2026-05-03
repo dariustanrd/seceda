@@ -2,6 +2,7 @@
 
 #include "runtime/interfaces.hpp"
 #include "runtime/request_executor.hpp"
+#include "telemetry/trace_registry.hpp"
 
 #include <memory>
 #include <mutex>
@@ -27,6 +28,14 @@ public:
     InfoSnapshot info() const;
     std::string metrics_text() const;
     EventBatch events(std::uint64_t since_id, std::size_t limit, std::string request_id = {}) const;
+    PromptTraceBatch trace_events(
+        std::uint64_t since_id,
+        std::size_t limit,
+        std::string request_id = {}) const;
+    std::uint64_t subscribe_traces(
+        std::string request_id,
+        TraceSubscriberCallback callback);
+    void unsubscribe_traces(std::uint64_t token);
 
 private:
     void update_state_locked(bool local_ready);
@@ -37,6 +46,7 @@ private:
     std::shared_ptr<ICloudClient> cloud_client_;
     std::shared_ptr<IRouter> router_;
     MetricsRegistry metrics_;
+    TraceRegistry traces_;
     RequestExecutor executor_;
     RuntimeState state_ = RuntimeState::kStarting;
     std::string last_error_;

@@ -181,6 +181,32 @@ json event_to_json(const InferenceEvent & event) {
     return payload;
 }
 
+json trace_event_to_json(const PromptTraceEvent & event) {
+    json payload = {
+        {"id", event.id},
+        {"sequence_number", event.sequence_number},
+        {"request_id", event.request_id},
+        {"transport", event.transport},
+        {"timestamp_utc", event.timestamp_utc},
+        {"phase", event.phase},
+        {"item_type", event.item_type},
+        {"item_id", event.item_id},
+        {"content_index", event.content_index >= 0 ? json(event.content_index) : json(nullptr)},
+        {"role", event.role},
+        {"tool_name", event.tool_name},
+        {"delta_text", event.delta_text},
+        {"text", event.text},
+    };
+    if (!event.payload_json.empty()) {
+        try {
+            payload["payload"] = json::parse(event.payload_json);
+        } catch (const std::exception &) {
+            payload["payload_json"] = event.payload_json;
+        }
+    }
+    return payload;
+}
+
 bool parse_query_uint64(
     const httplib::Request & request,
     const char * key,
@@ -230,6 +256,36 @@ void install_supported_routes(
         }
         for (const auto & event : batch.events) {
             payload["events"].push_back(event_to_json(event));
+        }
+
+        response.set_content(payload.dump(2), "application/json");
+    });
+
+    server.server().Get("/trace/events", [&](const httplib::Request & request, httplib::Response & response) {
+        std::string error;
+        std::uint64_t since_id = 0;
+        std::uint64_t limit = 2000;
+        const std::string request_id =
+            request.has_param("request_id") ? request.get_param_value("request_id") : std::string{};
+        if (!parse_query_uint64(request, "since_id", 0, since_id, error) ||
+            !parse_query_uint64(request, "limit", 2000, limit, error)) {
+            response.status = 400;
+            response.set_content(json{{"ok", false}, {"error", error}}.dump(2), "application/json");
+            return;
+        }
+
+        const auto batch = daemon.trace_events(since_id, static_cast<std::size_t>(limit), request_id);
+        json payload = {
+            {"since_id", batch.since_id},
+            {"latest_id", batch.latest_id},
+            {"returned", batch.events.size()},
+            {"events", json::array()},
+        };
+        if (!request_id.empty()) {
+            payload["request_id"] = request_id;
+        }
+        for (const auto & event : batch.events) {
+            payload["events"].push_back(trace_event_to_json(event));
         }
 
         response.set_content(payload.dump(2), "application/json");
@@ -510,6 +566,50 @@ bool test_chat_completion_id_correlates_to_metrics_events_and_inference_is_remov
         return false;
     }
     if (!require(event["local_timing"]["ttft_ms"] == 3.0, "local timing should include ttft")) {
+        return false;
+    }
+
+    const auto traces = cli.Get(("/trace/events?request_id=" + request_id).c_str());
+    if (!require(traces && traces->status == 200, "trace events 200")) {
+        return false;
+    }
+
+    json traces_body;
+    try {
+        traces_body = json::parse(traces->body);
+    } catch (...) {
+        return require(false, "trace events JSON");
+    }
+
+    if (!require(traces_body["events"].is_array() && traces_body["events"].size() >= 4, "trace rows")) {
+        return false;
+    }
+    if (!require(traces_body["events"][0]["phase"] == "request_normalized", "trace request normalized")) {
+        return false;
+    }
+    if (!require(traces_body["events"][1]["phase"] == "input_item", "trace input item")) {
+        return false;
+    }
+    if (!require(traces_body["events"][1]["text"] == "yo", "trace input text")) {
+        return false;
+    }
+    if (!require(traces_body["events"][2]["phase"] == "route_selected", "trace route selected")) {
+        return false;
+    }
+    if (!require(traces_body["events"][3]["phase"] == "output_item", "trace output item")) {
+        return false;
+    }
+    if (!require(traces_body["events"][3]["text"] == "hello from local", "trace output text")) {
+        return false;
+    }
+    if (!require(
+            traces_body["events"].back()["phase"] == "request_complete",
+            "trace completion phase")) {
+        return false;
+    }
+    if (!require(
+            traces_body["events"][0]["transport"] == "chat_completions",
+            "trace transport")) {
         return false;
     }
 

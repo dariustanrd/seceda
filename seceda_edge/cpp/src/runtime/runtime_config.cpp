@@ -1,5 +1,6 @@
 #include "runtime/runtime_config.hpp"
 
+#include "runtime/dotenv_load.hpp"
 #include "config_catalog/config_catalog.hpp"
 #include "config_catalog/simple_toml_read.hpp"
 #include "config_catalog/simple_toml.hpp"
@@ -1070,6 +1071,14 @@ bool RuntimeConfigParser::parse(
     }
     if (show_help) {
         return true;
+    }
+
+    {
+        std::string dotenv_error;
+        if (!load_dotenv_for_config_context(config_file.path, config_file.disable, dotenv_error)) {
+            error = std::move(dotenv_error);
+            return false;
+        }
     }
 
     if (!config_file.disable && !config_file.path.empty()) {

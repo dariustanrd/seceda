@@ -238,7 +238,11 @@ std::string render_runtime_config_catalog_help(const char * program_name) {
         out << "Config precedence: built-in defaults, TOML file, environment, CLI overrides.\n";
         out << "Default config file hint: " << kDefaultRuntimeConfigRelativePath << "\n";
     }
-    out << "Use `--config PATH` to load a different file or `--no-config` to skip file loading.\n\n";
+    out << "Use `--config PATH` to load a different file or `--no-config` to skip file loading.\n";
+    out << "If a `.env` file exists in the config directory or a parent directory (or in the "
+           "current working directory as a fallback), variables are loaded into the process "
+           "environment before the TOML file is read; existing environment variables are not "
+           "overwritten.\n\n";
 
     if (!loaded) {
         out << "Catalog load error: " << error << "\n";
