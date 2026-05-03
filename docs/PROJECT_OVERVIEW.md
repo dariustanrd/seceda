@@ -48,6 +48,10 @@ The first server MVP exposes a blocking headless daemon with a minimal
 through the mock runtime adapters, and returns a clean OpenAI-compatible
 Responses-style body without routing metadata in the public payload.
 
+The llama.cpp runtime package currently covers setup diagnostics: discovering a
+`llama-server` binary on `PATH`, checking an HTTP sidecar endpoint, and
+reporting runtime capabilities in the core adapter shape.
+
 
 ## Product Objective
 

@@ -59,6 +59,10 @@ This path routes through `seceda-core` and returns a minimal
 OpenAI-compatible Responses-style body. Seceda routing metadata remains
 internal and is not included in the public response.
 
+`seceda-llama` currently supports sidecar setup checks without native
+llama.cpp bindings: `llama-server` discovery on `PATH`, HTTP sidecar health
+checks, and capability metadata in the shape expected by `seceda-core`.
+
 
 ## Preserved Cloud Package
 
