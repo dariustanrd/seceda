@@ -13,11 +13,11 @@ export function App() {
   const api = useMemo(() => new SecedaApi(DEFAULT_BASE_URL), []);
 
   useKeyboard((key) => {
-    if (key.name === "f1") {
+    if (key.name === "o") {
       setActiveScreen("observability");
       return;
     }
-    if (key.name === "f2") {
+    if (key.name === "c") {
       setActiveScreen("configuration");
     }
   });
@@ -34,7 +34,7 @@ export function App() {
       <box border padding={1} flexDirection="column">
         <text>Seceda Console</text>
         <text>
-          Active screen: {activeScreen} | `F1` observability | `F2` configuration | base
+          Active screen: {activeScreen} | `o` observability | `c` configuration | base
           URL {api.baseUrl}
         </text>
         <text>Resolved config path: {DEFAULT_CONFIG_PATH}</text>
