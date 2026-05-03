@@ -36,6 +36,13 @@ through a runtime adapter trait, and returns normalized output plus internal
 trace events. The first adapter is a deterministic mock runtime for proving the
 contract before server, llama.cpp, Modal, or mobile SDK dependencies are added.
 
+The baseline router is heuristic and debuggable. It routes remote-only
+capabilities, long prompts, prompts above the estimated token threshold,
+structured-output keywords, freshness keywords, and cloud-complexity keywords to
+cloud with explicit matched rules. Simple requests default to local. Its default
+limits and keyword sets intentionally mirror the previous native heuristic
+router baseline.
+
 ## Product Objective
 
 Seceda should let OpenAI-compatible clients run against a local edge service while Seceda owns execution policy internally.

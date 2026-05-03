@@ -14,14 +14,24 @@ The root `Cargo.toml` defines these workspace members:
 
 `seceda-core` currently owns the portable tracer path: typed config defaults and
 validation, runtime capability metadata, a runtime adapter trait, a deterministic
-mock runtime, routing decisions, and observable execution results.
+mock runtime, heuristic routing decisions, and observable execution results.
 
-The initial router behavior is intentionally small:
+The baseline heuristic router behavior is:
 
 - `local/default` forces the configured local runtime.
 - `remote/default` forces the configured cloud runtime.
-- `seceda/default` uses keyword routing to choose cloud for configured cloud
-  keywords, otherwise it chooses the configured local runtime.
+- requests with tools, tool choice, or structured-output requirements route to
+  cloud.
+- prompts above the configured character or estimated token threshold route to
+  cloud. The baseline defaults match the previous native router:
+  `max_prompt_chars = 800` and `max_estimated_tokens = 256`.
+- structured-output, freshness, and complexity keyword matches route to cloud.
+- simple `seceda/default` requests choose the configured local runtime.
+
+Router decisions include target, reason, matched rules, estimated prompt tokens,
+and preferred runtime/model hints for later runtime selection. The estimated
+token count uses the previous native heuristic: the larger of whitespace word
+count and `ceil(character_count / 4)`.
 
 Run the minimal Rust checks from the repo root:
 
