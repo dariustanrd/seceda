@@ -15,4 +15,3 @@ workspace = true
 [[bin]]
 name = "seceda"
 path = "src/main.rs"
-

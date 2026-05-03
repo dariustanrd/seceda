@@ -43,6 +43,12 @@ cloud with explicit matched rules. Simple requests default to local. Its default
 limits and keyword sets intentionally mirror the previous native heuristic
 router baseline.
 
+The first server MVP exposes a blocking headless daemon with a minimal
+`POST /v1/responses` tracer. It accepts string `input`, calls `seceda-core`
+through the mock runtime adapters, and returns a clean OpenAI-compatible
+Responses-style body without routing metadata in the public payload.
+
+
 ## Product Objective
 
 Seceda should let OpenAI-compatible clients run against a local edge service while Seceda owns execution policy internally.

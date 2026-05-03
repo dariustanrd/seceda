@@ -175,6 +175,15 @@ The repository now includes a top-level Cargo workspace for the Rust rewrite:
 cargo test --workspace
 cargo run -p seceda-cli -- --help
 cargo run -p seceda-cli -- models
+cargo run -p seceda-cli -- server
+```
+
+Minimal Responses tracer:
+
+```bash
+curl http://127.0.0.1:8080/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{"model":"seceda/default","input":"hello"}'
 ```
 
 The preserved Python cloud runtime is still managed through `uv`:

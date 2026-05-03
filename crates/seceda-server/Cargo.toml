@@ -8,7 +8,7 @@ description = "Server scaffold for Seceda's OpenAI-compatible localhost API."
 
 [dependencies]
 seceda-core = { path = "../seceda-core" }
+serde_json = "1"
 
 [lints]
 workspace = true
-

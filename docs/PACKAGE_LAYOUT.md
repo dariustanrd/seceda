@@ -44,7 +44,21 @@ Run the CLI scaffold:
 ```bash
 cargo run -p seceda-cli -- --help
 cargo run -p seceda-cli -- models
+cargo run -p seceda-cli -- server
 ```
+
+The first headless server tracer exposes:
+
+```bash
+curl http://127.0.0.1:8080/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{"model":"seceda/default","input":"hello"}'
+```
+
+This path routes through `seceda-core` and returns a minimal
+OpenAI-compatible Responses-style body. Seceda routing metadata remains
+internal and is not included in the public response.
+
 
 ## Preserved Cloud Package
 
