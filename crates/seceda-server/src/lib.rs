@@ -1,7 +1,8 @@
 //! Server boundary for Seceda's OpenAI-compatible localhost API.
 
 use seceda_cloud_providers::{
-    codex_subscription_provider, modal_provider, CODEX_SUBSCRIPTION_RUNTIME_ID, MODAL_RUNTIME_ID,
+    codex_subscription_provider, modal_provider, CodexSubscriptionRuntimeAdapter,
+    SecedaCredentialStore, CODEX_SUBSCRIPTION_RUNTIME_ID, MODAL_RUNTIME_ID,
 };
 use seceda_core::{
     execute_with_adapters, stream_with_adapters, BackendKind, ChatMessage, ChatRequest,
@@ -25,6 +26,7 @@ pub struct ServerConfig {
     pub port: u16,
     pub llama_sidecar: LlamaSidecarConfig,
     pub cloud_fallback: CloudFallbackSelection,
+    pub codex_subscription: CodexSubscriptionCloudConfig,
 }
 
 impl Default for ServerConfig {
@@ -34,6 +36,22 @@ impl Default for ServerConfig {
             port: 8080,
             llama_sidecar: LlamaSidecarConfig::default(),
             cloud_fallback: CloudFallbackSelection::Modal,
+            codex_subscription: CodexSubscriptionCloudConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexSubscriptionCloudConfig {
+    pub endpoint: String,
+    pub seceda_home: Option<String>,
+}
+
+impl Default for CodexSubscriptionCloudConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: CodexSubscriptionRuntimeAdapter::default_endpoint().to_string(),
+            seceda_home: None,
         }
     }
 }
@@ -381,6 +399,7 @@ impl From<serde_json::Error> for ServerError {
 pub struct ServerState {
     core_config: RefCell<SecedaConfig>,
     cloud_fallback: RefCell<CloudFallbackSelection>,
+    codex_subscription: CodexSubscriptionCloudConfig,
     sidecar: LlamaSidecarSupervisor,
     traces: RefCell<Vec<ObservableEvent>>,
 }
@@ -392,6 +411,7 @@ impl Default for ServerState {
                 CloudFallbackSelection::Modal,
             )),
             cloud_fallback: RefCell::new(CloudFallbackSelection::Modal),
+            codex_subscription: CodexSubscriptionCloudConfig::default(),
             sidecar: LlamaSidecarSupervisor::new(LlamaSidecarConfig::default()),
             traces: RefCell::new(Vec::new()),
         }
@@ -403,6 +423,7 @@ impl ServerState {
         Self {
             core_config: RefCell::new(core_config_for_cloud_selection(config.cloud_fallback)),
             cloud_fallback: RefCell::new(config.cloud_fallback),
+            codex_subscription: config.codex_subscription,
             sidecar: LlamaSidecarSupervisor::new(config.llama_sidecar),
             traces: RefCell::new(Vec::new()),
         }
@@ -419,6 +440,20 @@ impl ServerState {
     pub fn set_cloud_fallback(&self, selection: CloudFallbackSelection) {
         *self.cloud_fallback.borrow_mut() = selection;
         *self.core_config.borrow_mut() = core_config_for_cloud_selection(selection);
+    }
+
+    fn codex_credential_store(&self) -> Result<SecedaCredentialStore, OpenAiError> {
+        match &self.codex_subscription.seceda_home {
+            Some(home) => Ok(SecedaCredentialStore::new(home)),
+            None => SecedaCredentialStore::from_env().map_err(|error| {
+                OpenAiError::new(
+                    500,
+                    "server_error",
+                    "credential_store_unavailable",
+                    error.to_string(),
+                )
+            }),
+        }
     }
 
     pub fn observed_events(&self) -> Vec<ObservableEvent> {
@@ -591,9 +626,16 @@ fn route_http_request(raw: &str, state: &ServerState) -> Result<HttpResponse, Op
     let core_request = responses_request_to_core(&body)?;
     let local = LlamaRuntimeAdapter::new(state.llama_sidecar_status().endpoint);
     let modal_cloud = MockRuntimeAdapter::new(MODAL_RUNTIME_ID, BackendKind::Cloud);
-    let codex_cloud = MockRuntimeAdapter::new(CODEX_SUBSCRIPTION_RUNTIME_ID, BackendKind::Cloud);
+    let codex_cloud = if state.cloud_fallback() == CloudFallbackSelection::CodexSubscription {
+        Some(CodexSubscriptionRuntimeAdapter::new(
+            state.codex_subscription.endpoint.clone(),
+            state.codex_credential_store()?,
+        ))
+    } else {
+        None
+    };
     let adapters: Vec<&dyn RuntimeAdapter> = match state.cloud_fallback() {
-        CloudFallbackSelection::CodexSubscription => vec![&local, &codex_cloud],
+        CloudFallbackSelection::CodexSubscription => vec![&local, codex_cloud.as_ref().unwrap()],
         CloudFallbackSelection::Modal => vec![&local, &modal_cloud],
         CloudFallbackSelection::LocalOnly => vec![&local],
     };
@@ -954,6 +996,15 @@ fn record_stream_trace_events(
 }
 
 fn responses_request_to_core(body: &Value) -> Result<ChatRequest, OpenAiError> {
+    if body.get("previous_response_id").is_some() {
+        return Err(OpenAiError::new(
+            400,
+            "invalid_request_error",
+            "unsupported_stateful_responses",
+            "stateful Responses continuation is not supported by this route",
+        ));
+    }
+
     let input = body.get("input").ok_or_else(|| {
         OpenAiError::new(
             400,
@@ -1432,10 +1483,15 @@ mod tests {
 
     #[test]
     fn codex_subscription_selection_routes_cloud_requests_to_selected_runtime() {
-        let state = ServerState::new(ServerConfig {
-            cloud_fallback: CloudFallbackSelection::CodexSubscription,
-            ..ServerConfig::default()
-        });
+        let state = server_state_with_fake_codex_subscription(
+            |request| {
+                assert!(request.contains("Authorization: Bearer access-token"));
+                assert!(request.contains("ChatGPT-Account-Id: acct_123"));
+                assert!(request.contains(r#""input":"hello""#));
+            },
+            200,
+            r#"{"model":"gpt-5.1-codex","output":[{"content":[{"type":"output_text","text":"hello from codex cloud"}]}]}"#,
+        );
         let raw = http_request(
             "POST",
             "/v1/responses",
@@ -1448,9 +1504,204 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert_eq!(
             value["output"][0]["content"][0]["text"],
-            "cloud/codex-subscription response: hello"
+            "hello from codex cloud"
         );
         assert!(value.get("routing").is_none());
+    }
+
+    #[test]
+    fn codex_subscription_streams_through_public_responses_path() {
+        let state = server_state_with_fake_codex_subscription(
+            |request| {
+                assert!(request.contains(r#""stream":true"#));
+            },
+            200,
+            concat!(
+                "data: {\"type\":\"response.created\",\"response\":{\"model\":\"gpt-5.1-codex\"}}\n\n",
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hel\"}\n\n",
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"model\":\"gpt-5.1-codex\"}}\n\n",
+                "data: [DONE]\n\n"
+            ),
+        );
+        let raw = http_request(
+            "POST",
+            "/v1/responses",
+            r#"{"model":"seceda/default","input":"latest news","stream":true}"#,
+        );
+
+        let response = handle_http_request(&raw, &state);
+        let body = response_body(&response);
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert_eq!(sse_event_names(body).last(), Some(&"response.completed"));
+        assert!(body.contains("hel"));
+        assert!(body.contains("lo"));
+        assert!(!body.contains("ChatGPT-Account-Id"));
+        assert!(!body.contains("access-token"));
+        assert!(!body.contains("FreshnessKeyword"));
+    }
+
+    #[test]
+    fn codex_subscription_missing_credentials_return_clean_error() {
+        let home = test_store_dir("server-missing-credential");
+        let state = ServerState::new(ServerConfig {
+            cloud_fallback: CloudFallbackSelection::CodexSubscription,
+            codex_subscription: CodexSubscriptionCloudConfig {
+                endpoint: "http://127.0.0.1:1/backend-api/codex/responses".to_string(),
+                seceda_home: Some(home.to_string_lossy().to_string()),
+            },
+            ..ServerConfig::default()
+        });
+        let raw = http_request(
+            "POST",
+            "/v1/responses",
+            r#"{"model":"seceda/default","input":"latest news"}"#,
+        );
+
+        let response = handle_http_request(&raw, &state);
+        let value: Value = serde_json::from_str(response_body(&response)).expect("json response");
+
+        assert!(response.starts_with("HTTP/1.1 500 Internal Server Error"));
+        assert_eq!(value["error"]["code"], "core_execution_failed");
+        assert!(value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("missing"));
+        assert!(!response.contains("access-token"));
+    }
+
+    #[test]
+    fn codex_subscription_expired_and_malformed_credentials_return_clean_errors() {
+        let expired_home = test_store_dir("server-expired-credential");
+        let expired_store = seceda_cloud_providers::SecedaCredentialStore::new(&expired_home);
+        let expired = seceda_cloud_providers::CodexSubscriptionCredential::new(
+            "access-token",
+            Some("refresh-token"),
+            seceda_cloud_providers::current_unix_seconds().saturating_sub(1),
+            "acct_123",
+        );
+        std::fs::create_dir_all(expired_store.home_dir()).expect("expired dir");
+        std::fs::write(
+            expired_store.codex_subscription_credential_path(),
+            serde_json::to_string(&expired).expect("expired json"),
+        )
+        .expect("expired write");
+
+        let malformed_home = test_store_dir("server-malformed-credential");
+        let malformed_store = seceda_cloud_providers::SecedaCredentialStore::new(&malformed_home);
+        std::fs::create_dir_all(malformed_store.home_dir()).expect("malformed dir");
+        std::fs::write(
+            malformed_store.codex_subscription_credential_path(),
+            "{not-json",
+        )
+        .expect("malformed write");
+
+        for home in [expired_home, malformed_home] {
+            let state = ServerState::new(ServerConfig {
+                cloud_fallback: CloudFallbackSelection::CodexSubscription,
+                codex_subscription: CodexSubscriptionCloudConfig {
+                    endpoint: "http://127.0.0.1:1/backend-api/codex/responses".to_string(),
+                    seceda_home: Some(home.to_string_lossy().to_string()),
+                },
+                ..ServerConfig::default()
+            });
+            let raw = http_request(
+                "POST",
+                "/v1/responses",
+                r#"{"model":"seceda/default","input":"latest news"}"#,
+            );
+
+            let response = handle_http_request(&raw, &state);
+            let value: Value =
+                serde_json::from_str(response_body(&response)).expect("json response");
+
+            assert!(response.starts_with("HTTP/1.1 500 Internal Server Error"));
+            assert_eq!(value["error"]["code"], "core_execution_failed");
+            assert!(!response.contains("access-token"));
+            assert!(!response.contains("refresh-token"));
+        }
+    }
+
+    #[test]
+    fn codex_subscription_rejects_unsupported_capabilities_before_backend_call() {
+        let home = test_store_dir("server-unsupported-capability");
+        let store = seceda_cloud_providers::SecedaCredentialStore::new(&home);
+        let credential = seceda_cloud_providers::CodexSubscriptionCredential::new(
+            "access-token",
+            Some("refresh-token"),
+            seceda_cloud_providers::current_unix_seconds() + 3600,
+            "acct_123",
+        );
+        store
+            .write_codex_subscription_credential(&credential)
+            .expect("credential write");
+        let state = ServerState::new(ServerConfig {
+            cloud_fallback: CloudFallbackSelection::CodexSubscription,
+            codex_subscription: CodexSubscriptionCloudConfig {
+                endpoint: "http://127.0.0.1:1/backend-api/codex/responses".to_string(),
+                seceda_home: Some(home.to_string_lossy().to_string()),
+            },
+            ..ServerConfig::default()
+        });
+        let raw = http_request(
+            "POST",
+            "/v1/responses",
+            r#"{"model":"seceda/default","input":"hello","previous_response_id":"resp_old"}"#,
+        );
+
+        let response = handle_http_request(&raw, &state);
+        let value: Value = serde_json::from_str(response_body(&response)).expect("json response");
+
+        assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
+        assert_eq!(value["error"]["code"], "unsupported_stateful_responses");
+    }
+
+    #[test]
+    fn codex_subscription_backend_auth_rejection_is_not_leaky() {
+        let state = server_state_with_fake_codex_subscription(|_| {}, 401, "unauthorized");
+        let raw = http_request(
+            "POST",
+            "/v1/responses",
+            r#"{"model":"seceda/default","input":"latest news"}"#,
+        );
+
+        let response = handle_http_request(&raw, &state);
+        let value: Value = serde_json::from_str(response_body(&response)).expect("json response");
+
+        assert!(response.starts_with("HTTP/1.1 500 Internal Server Error"));
+        assert!(value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("HTTP 401"));
+        assert!(!response.contains("access-token"));
+        assert!(!response.contains("acct_123"));
+    }
+
+    #[test]
+    fn local_only_setup_keeps_cloud_requests_from_using_codex_backend() {
+        let state = ServerState::new(ServerConfig {
+            cloud_fallback: CloudFallbackSelection::LocalOnly,
+            codex_subscription: CodexSubscriptionCloudConfig {
+                endpoint: "http://127.0.0.1:1/backend-api/codex/responses".to_string(),
+                seceda_home: Some(test_store_dir("local-only").to_string_lossy().to_string()),
+            },
+            ..ServerConfig::default()
+        });
+        let raw = http_request(
+            "POST",
+            "/v1/responses",
+            r#"{"model":"seceda/default","input":"latest news"}"#,
+        );
+
+        let response = handle_http_request(&raw, &state);
+        let value: Value = serde_json::from_str(response_body(&response)).expect("json response");
+
+        assert!(response.starts_with("HTTP/1.1 500 Internal Server Error"));
+        assert!(value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no adapter registered"));
     }
 
     #[test]
@@ -1658,6 +1909,59 @@ mod tests {
         format!("http://{addr}/health")
     }
 
+    fn server_state_with_fake_codex_subscription(
+        assert_request: impl FnOnce(&str) + Send + 'static,
+        status: u16,
+        response_body: &'static str,
+    ) -> ServerState {
+        let home = test_store_dir("server-codex");
+        let store = seceda_cloud_providers::SecedaCredentialStore::new(&home);
+        let credential = seceda_cloud_providers::CodexSubscriptionCredential::new(
+            "access-token",
+            Some("refresh-token"),
+            seceda_cloud_providers::current_unix_seconds() + 3600,
+            "acct_123",
+        );
+        store
+            .write_codex_subscription_credential(&credential)
+            .expect("credential write");
+        let endpoint = spawn_fake_codex_subscription_server(assert_request, status, response_body);
+
+        ServerState::new(ServerConfig {
+            cloud_fallback: CloudFallbackSelection::CodexSubscription,
+            codex_subscription: CodexSubscriptionCloudConfig {
+                endpoint,
+                seceda_home: Some(home.to_string_lossy().to_string()),
+            },
+            ..ServerConfig::default()
+        })
+    }
+
+    fn spawn_fake_codex_subscription_server(
+        assert_request: impl FnOnce(&str) + Send + 'static,
+        status: u16,
+        response_body: &'static str,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let addr = listener.local_addr().expect("local addr");
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buffer = [0; 8192];
+            let bytes = stream.read(&mut buffer).expect("read");
+            let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+            assert!(request.starts_with("POST /backend-api/codex/responses HTTP/1.1"));
+            assert_request(&request);
+            let reason = if status == 200 { "OK" } else { "Error" };
+            let response = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).expect("write");
+        });
+        format!("http://{addr}/backend-api/codex/responses")
+    }
+
     fn llama_config_for_endpoint(endpoint: &str) -> LlamaSidecarConfig {
         let rest = endpoint
             .strip_prefix("http://")
@@ -1678,6 +1982,18 @@ mod tests {
     fn unused_port() -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
         listener.local_addr().expect("local addr").port()
+    }
+
+    fn test_store_dir(name: &str) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        path.push(format!("seceda-server-test-{name}-{}", std::process::id()));
+        path.push(nanos.to_string());
+        let _ = std::fs::remove_dir_all(&path);
+        path
     }
 
     fn wait_for_stopped_sidecar(state: &ServerState) -> LlamaSidecarStatus {

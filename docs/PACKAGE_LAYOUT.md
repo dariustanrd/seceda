@@ -72,6 +72,14 @@ curl -N http://127.0.0.1:8080/v1/responses \
 The stream emits Responses-style SSE events for response creation, output item
 creation, text delta, completion, and final response completion.
 
+Codex Subscription smoke coverage is mocked in the Rust test suite rather than
+requiring a real ChatGPT account in CI. Run `cargo test --workspace` from the
+repo root to verify Seceda-owned credentials, Codex request headers, public
+`/v1/responses` streaming, missing/expired/malformed credential failures,
+backend auth rejection, local-only fallback behavior, and unsupported stateful
+Responses rejection. A real-account smoke remains manual until the OAuth setup
+flow can safely open a browser and refresh live ChatGPT tokens.
+
 `seceda-llama` currently supports sidecar setup checks without native
 llama.cpp bindings: `llama-server` discovery on `PATH`, HTTP sidecar health
 checks, and capability metadata in the shape expected by `seceda-core`.
