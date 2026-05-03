@@ -1,5 +1,0 @@
-foreach(app_dir IN ITEMS seceda_edge_daemon)
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${app_dir}/CMakeLists.txt")
-        add_subdirectory(${app_dir})
-    endif()
-endforeach()
