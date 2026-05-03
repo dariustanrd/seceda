@@ -59,6 +59,17 @@ This path routes through `seceda-core` and returns a minimal
 OpenAI-compatible Responses-style body. Seceda routing metadata remains
 internal and is not included in the public response.
 
+Streaming is available for the same tracer scope:
+
+```bash
+curl -N http://127.0.0.1:8080/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{"model":"seceda/default","input":"hello","stream":true}'
+```
+
+The stream emits Responses-style SSE events for response creation, output item
+creation, text delta, completion, and final response completion.
+
 `seceda-llama` currently supports sidecar setup checks without native
 llama.cpp bindings: `llama-server` discovery on `PATH`, HTTP sidecar health
 checks, and capability metadata in the shape expected by `seceda-core`.
