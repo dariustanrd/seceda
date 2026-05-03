@@ -1,10 +1,11 @@
 //! Server boundary for Seceda's OpenAI-compatible localhost API.
 
 use seceda_core::{
-    execute_with_adapters, BackendKind, ChatMessage, ChatRequest, MockRuntimeAdapter,
-    ModelDescriptor, RequestFeatures, RuntimeAdapter, SecedaConfig,
+    execute_with_adapters, stream_with_adapters, BackendKind, ChatMessage, ChatRequest,
+    MockRuntimeAdapter, ModelDescriptor, RequestFeatures, RuntimeAdapter, RuntimeStreamEvent,
+    SecedaConfig, StreamExecutionResult,
 };
-use seceda_llama::{check_sidecar_health_with_timeout, SidecarHealth};
+use seceda_llama::{check_sidecar_health_with_timeout, LlamaRuntimeAdapter, SidecarHealth};
 use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::error::Error;
@@ -450,9 +451,29 @@ fn route_http_request(raw: &str, state: &ServerState) -> Result<HttpResponse, Op
     })?;
     let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let core_request = responses_request_to_core(&body)?;
-    let local = MockRuntimeAdapter::new("local/llama.cpp", BackendKind::Local);
+    let local = LlamaRuntimeAdapter::new(state.llama_sidecar_status().endpoint);
     let cloud = MockRuntimeAdapter::new("remote/modal-default", BackendKind::Cloud);
     let adapters: [&dyn RuntimeAdapter; 2] = [&local, &cloud];
+
+    if stream {
+        let result = stream_with_adapters(&state.core_config, &core_request, &adapters).map_err(
+            |error| {
+                OpenAiError::new(
+                    500,
+                    "server_error",
+                    "core_execution_failed",
+                    error.to_string(),
+                )
+            },
+        )?;
+        record_stream_trace_events(state, RESPONSE_ID, &result);
+
+        return Ok(HttpResponse::sse(
+            200,
+            response_stream(RESPONSE_ID, &result.events),
+        ));
+    }
+
     let result =
         execute_with_adapters(&state.core_config, &core_request, &adapters).map_err(|error| {
             OpenAiError::new(
@@ -463,13 +484,6 @@ fn route_http_request(raw: &str, state: &ServerState) -> Result<HttpResponse, Op
             )
         })?;
     record_trace_events(state, RESPONSE_ID, &result);
-
-    if stream {
-        return Ok(HttpResponse::sse(
-            200,
-            response_stream(RESPONSE_ID, &result),
-        ));
-    }
 
     Ok(HttpResponse::json(200, response_json(RESPONSE_ID, &result)))
 }
@@ -515,8 +529,17 @@ fn response_json(id: &str, result: &seceda_core::ExecutionResult) -> Value {
     })
 }
 
-fn response_stream(id: &str, result: &seceda_core::ExecutionResult) -> Vec<SseEvent> {
-    vec![
+fn response_stream(id: &str, runtime_events: &[RuntimeStreamEvent]) -> Vec<SseEvent> {
+    let model = runtime_events
+        .iter()
+        .find_map(|event| match event {
+            RuntimeStreamEvent::Started { model } => Some(model.as_str()),
+            RuntimeStreamEvent::Completed { output } => Some(output.model.as_str()),
+            _ => None,
+        })
+        .unwrap_or("seceda/default");
+    let mut text = String::new();
+    let mut events = vec![
         SseEvent::new(
             "response.created",
             json!({
@@ -524,7 +547,7 @@ fn response_stream(id: &str, result: &seceda_core::ExecutionResult) -> Vec<SseEv
                 "response": {
                     "id": id,
                     "object": "response",
-                    "model": result.output.model,
+                    "model": model,
                     "status": "in_progress"
                 }
             }),
@@ -556,66 +579,127 @@ fn response_stream(id: &str, result: &seceda_core::ExecutionResult) -> Vec<SseEv
                 }
             }),
         ),
-        SseEvent::new(
-            "response.output_text.delta",
-            json!({
-                "type": "response.output_text.delta",
-                "item_id": "msg_mock_0000000000000000",
-                "output_index": 0,
-                "content_index": 0,
-                "delta": result.output.text
-            }),
-        ),
-        SseEvent::new(
-            "response.output_text.done",
-            json!({
-                "type": "response.output_text.done",
-                "item_id": "msg_mock_0000000000000000",
-                "output_index": 0,
-                "content_index": 0,
-                "text": result.output.text
-            }),
-        ),
-        SseEvent::new(
-            "response.content_part.done",
-            json!({
-                "type": "response.content_part.done",
-                "item_id": "msg_mock_0000000000000000",
-                "output_index": 0,
-                "content_index": 0,
-                "part": {
-                    "type": "output_text",
-                    "text": result.output.text
-                }
-            }),
-        ),
-        SseEvent::new(
-            "response.output_item.done",
-            json!({
-                "type": "response.output_item.done",
-                "output_index": 0,
-                "item": {
-                    "id": "msg_mock_0000000000000000",
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "completed",
-                    "content": [
-                        {
-                            "type": "output_text",
-                            "text": result.output.text
+    ];
+
+    for runtime_event in runtime_events {
+        match runtime_event {
+            RuntimeStreamEvent::Started { .. } => {}
+            RuntimeStreamEvent::TextDelta { text: delta } => {
+                text.push_str(delta);
+                events.push(SseEvent::new(
+                    "response.output_text.delta",
+                    json!({
+                        "type": "response.output_text.delta",
+                        "item_id": "msg_mock_0000000000000000",
+                        "output_index": 0,
+                        "content_index": 0,
+                        "delta": delta
+                    }),
+                ));
+            }
+            RuntimeStreamEvent::Completed { output } => {
+                text = output.text.clone();
+            }
+            RuntimeStreamEvent::Failed { message } => {
+                events.push(SseEvent::new(
+                    "response.failed",
+                    json!({
+                        "type": "response.failed",
+                        "response": {
+                            "id": id,
+                            "object": "response",
+                            "model": model,
+                            "status": "failed",
+                            "error": {
+                                "type": "server_error",
+                                "code": "runtime_stream_failed",
+                                "message": message
+                            }
                         }
-                    ]
-                }
-            }),
-        ),
-        SseEvent::new(
-            "response.completed",
-            json!({
-                "type": "response.completed",
-                "response": response_json(id, result)
-            }),
-        ),
-    ]
+                    }),
+                ));
+                return events;
+            }
+        }
+    }
+
+    let completed = completed_stream_response_json(id, model, &text);
+    events.push(SseEvent::new(
+        "response.output_text.done",
+        json!({
+            "type": "response.output_text.done",
+            "item_id": "msg_mock_0000000000000000",
+            "output_index": 0,
+            "content_index": 0,
+            "text": text
+        }),
+    ));
+    events.push(SseEvent::new(
+        "response.content_part.done",
+        json!({
+            "type": "response.content_part.done",
+            "item_id": "msg_mock_0000000000000000",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {
+                "type": "output_text",
+                "text": text
+            }
+        }),
+    ));
+    events.push(SseEvent::new(
+        "response.output_item.done",
+        json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "id": "msg_mock_0000000000000000",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": text
+                    }
+                ]
+            }
+        }),
+    ));
+    events.push(SseEvent::new(
+        "response.completed",
+        json!({
+            "type": "response.completed",
+            "response": completed
+        }),
+    ));
+    events
+}
+
+fn completed_stream_response_json(id: &str, model: &str, text: &str) -> Value {
+    json!({
+        "id": id,
+        "object": "response",
+        "model": model,
+        "output": [
+            {
+                "type": "message",
+                "id": "msg_mock_0000000000000000",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": text
+                    }
+                ]
+            }
+        ],
+        "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0
+        }
+    })
 }
 
 fn record_trace_events(
@@ -655,6 +739,53 @@ fn record_trace_events(
     });
 }
 
+fn record_stream_trace_events(
+    state: &ServerState,
+    request_id: &str,
+    result: &StreamExecutionResult,
+) {
+    state.record(ObservableEvent {
+        request_id: request_id.to_string(),
+        kind: ObservableEventKind::RequestNormalized,
+        message: "responses request normalized".to_string(),
+    });
+    state.record(ObservableEvent {
+        request_id: request_id.to_string(),
+        kind: ObservableEventKind::RoutingDecided,
+        message: format!(
+            "target={:?} reason={:?} matched_rules={}",
+            result.routing.target,
+            result.routing.reason,
+            result.routing.matched_rules.join(",")
+        ),
+    });
+    state.record(ObservableEvent {
+        request_id: request_id.to_string(),
+        kind: ObservableEventKind::RuntimeSelected,
+        message: format!("runtime={}", result.routing.runtime_id),
+    });
+    for event in &result.events {
+        match event {
+            RuntimeStreamEvent::TextDelta { text } => state.record(ObservableEvent {
+                request_id: request_id.to_string(),
+                kind: ObservableEventKind::StreamDelta,
+                message: format!("bytes={}", text.len()),
+            }),
+            RuntimeStreamEvent::Completed { output } => state.record(ObservableEvent {
+                request_id: request_id.to_string(),
+                kind: ObservableEventKind::Completed,
+                message: format!("finish_reason={:?}", output.finish_reason),
+            }),
+            RuntimeStreamEvent::Failed { message } => state.record(ObservableEvent {
+                request_id: request_id.to_string(),
+                kind: ObservableEventKind::Error,
+                message: message.clone(),
+            }),
+            RuntimeStreamEvent::Started { .. } => {}
+        }
+    }
+}
+
 fn responses_request_to_core(body: &Value) -> Result<ChatRequest, OpenAiError> {
     let input = body.get("input").ok_or_else(|| {
         OpenAiError::new(
@@ -683,7 +814,13 @@ fn responses_request_to_core(body: &Value) -> Result<ChatRequest, OpenAiError> {
         structured_output: body.get("response_format").is_some(),
     };
 
-    Ok(ChatRequest::new(model, vec![ChatMessage::user(input)]).with_features(features))
+    let mut messages = Vec::new();
+    if let Some(instructions) = body.get("instructions").and_then(Value::as_str) {
+        messages.push(ChatMessage::system(instructions));
+    }
+    messages.push(ChatMessage::user(input));
+
+    Ok(ChatRequest::new(model, messages).with_features(features))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -996,19 +1133,37 @@ mod tests {
             r#"{"model":"seceda/default","input":"hello"}"#,
         );
 
-        let response = handle_http_request(&raw, &ServerState::default());
+        let response = handle_http_request(&raw, &server_state_with_fake_llama("hello from llama"));
         let body = response_body(&response);
         let value: Value = serde_json::from_str(body).expect("json response");
 
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert_eq!(value["object"], "response");
         assert_eq!(value["model"], "seceda/default");
-        assert_eq!(
-            value["output"][0]["content"][0]["text"],
-            "local/llama.cpp response: hello"
-        );
+        assert_eq!(value["output"][0]["content"][0]["text"], "hello from llama");
         assert!(value.get("routing").is_none());
         assert!(value.get("matched_rules").is_none());
+    }
+
+    #[test]
+    fn responses_path_maps_instructions_to_system_message_for_llama() {
+        let state = server_state_with_inspecting_fake_llama(|request| {
+            assert!(request.contains(r#""role":"system""#));
+            assert!(request.contains(r#""content":"speak tersely""#));
+            assert!(request.contains(r#""role":"user""#));
+            assert!(request.contains(r#""content":"hello""#));
+        });
+        let raw = http_request(
+            "POST",
+            "/v1/responses",
+            r#"{"model":"seceda/default","instructions":"speak tersely","input":"hello"}"#,
+        );
+
+        let response = handle_http_request(&raw, &state);
+        let value: Value = serde_json::from_str(response_body(&response)).expect("json response");
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert_eq!(value["output"][0]["content"][0]["text"], "inspected");
     }
 
     #[test]
@@ -1050,7 +1205,7 @@ mod tests {
             r#"{"model":"seceda/default","input":"hello","stream":true}"#,
         );
 
-        let response = handle_http_request(&raw, &ServerState::default());
+        let response = handle_http_request(&raw, &server_state_with_fake_llama_stream());
         let events = sse_event_names(response_body(&response));
 
         assert!(response.starts_with("HTTP/1.1 200 OK"));
@@ -1062,13 +1217,15 @@ mod tests {
                 "response.output_item.added",
                 "response.content_part.added",
                 "response.output_text.delta",
+                "response.output_text.delta",
                 "response.output_text.done",
                 "response.content_part.done",
                 "response.output_item.done",
                 "response.completed",
             ]
         );
-        assert!(response.contains("local/llama.cpp response: hello"));
+        assert!(response.contains("hel"));
+        assert!(response.contains("lo"));
     }
 
     #[test]
@@ -1117,7 +1274,7 @@ mod tests {
     fn serve_one_handles_http_level_request() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
         let addr = listener.local_addr().expect("local addr");
-        let state = ServerState::default();
+        let state = server_state_with_fake_llama("hello over tcp");
         let server = thread::spawn(move || serve_one(listener, &state));
 
         let mut stream = TcpStream::connect(addr).expect("client connect");
@@ -1161,6 +1318,72 @@ mod tests {
             let status_text = if status == 200 { "OK" } else { "Unavailable" };
             let response = format!(
                 "HTTP/1.1 {status} {status_text}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+            );
+            stream.write_all(response.as_bytes()).expect("write");
+        });
+        format!("http://{addr}/health")
+    }
+
+    fn server_state_with_fake_llama(text: &str) -> ServerState {
+        let endpoint = spawn_fake_llama_server(
+            None,
+            format!(
+                r#"{{"model":"seceda/default","choices":[{{"message":{{"content":"{text}"}},"finish_reason":"stop"}}]}}"#
+            ),
+        );
+        ServerState::new(ServerConfig {
+            llama_sidecar: llama_config_for_endpoint(&endpoint),
+            ..ServerConfig::default()
+        })
+    }
+
+    fn server_state_with_fake_llama_stream() -> ServerState {
+        let body = [
+            r#"data: {"model":"seceda/default","choices":[{"delta":{"content":"hel"},"finish_reason":null}]}"#,
+            r#"data: {"model":"seceda/default","choices":[{"delta":{"content":"lo"},"finish_reason":"stop"}]}"#,
+            "data: [DONE]",
+            "",
+        ]
+        .join("\n");
+        let endpoint = spawn_fake_llama_server(None, body);
+        ServerState::new(ServerConfig {
+            llama_sidecar: llama_config_for_endpoint(&endpoint),
+            ..ServerConfig::default()
+        })
+    }
+
+    fn server_state_with_inspecting_fake_llama(
+        assert_request: impl FnOnce(&str) + Send + 'static,
+    ) -> ServerState {
+        let endpoint = spawn_fake_llama_server(
+            Some(Box::new(assert_request)),
+            r#"{"model":"seceda/default","choices":[{"message":{"content":"inspected"},"finish_reason":"stop"}]}"#.to_string(),
+        );
+        ServerState::new(ServerConfig {
+            llama_sidecar: llama_config_for_endpoint(&endpoint),
+            ..ServerConfig::default()
+        })
+    }
+
+    fn spawn_fake_llama_server(
+        assert_request: Option<Box<dyn FnOnce(&str) + Send>>,
+        response_body: String,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let addr = listener.local_addr().expect("local addr");
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buffer = [0; 8192];
+            let bytes = stream.read(&mut buffer).expect("read");
+            let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+            assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1"));
+            if let Some(assert_request) = assert_request {
+                assert_request(&request);
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
             );
             stream.write_all(response.as_bytes()).expect("write");
         });

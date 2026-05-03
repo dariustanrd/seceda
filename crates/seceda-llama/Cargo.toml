@@ -8,7 +8,7 @@ description = "llama.cpp runtime integration scaffold for Seceda."
 
 [dependencies]
 seceda-core = { path = "../seceda-core" }
+serde_json = "1"
 
 [lints]
 workspace = true
-

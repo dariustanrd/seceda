@@ -48,6 +48,7 @@ name = "seceda-llama"
 version = "0.1.0"
 dependencies = [
  "seceda-core",
+ "serde_json",
 ]
 
 [[package]]

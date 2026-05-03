@@ -58,6 +58,13 @@ pub struct ChatMessage {
 }
 
 impl ChatMessage {
+    pub fn system(content: impl Into<String>) -> Self {
+        Self {
+            role: ChatRole::System,
+            content: content.into(),
+        }
+    }
+
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: ChatRole::User,
@@ -273,6 +280,11 @@ pub trait RuntimeAdapter {
     fn capabilities(&self) -> RuntimeCapabilities;
 
     fn execute(&self, request: &ChatRequest) -> Result<RuntimeOutput, RuntimeError>;
+
+    fn execute_stream(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<Vec<RuntimeStreamEvent>, RuntimeError>;
 }
 
 /// Runtime output after adapter-specific shapes have been normalized.
@@ -291,6 +303,15 @@ impl RuntimeOutput {
             finish_reason: FinishReason::Stop,
         }
     }
+}
+
+/// Runtime stream events after adapter-specific chunks have been normalized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeStreamEvent {
+    Started { model: String },
+    TextDelta { text: String },
+    Completed { output: RuntimeOutput },
+    Failed { message: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -361,6 +382,28 @@ impl RuntimeAdapter for MockRuntimeAdapter {
             request.model.clone(),
         ))
     }
+
+    fn execute_stream(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<Vec<RuntimeStreamEvent>, RuntimeError> {
+        let output = self.execute(request)?;
+        let midpoint = output.text.len() / 2;
+        let (first, second) = output.text.split_at(midpoint);
+
+        Ok(vec![
+            RuntimeStreamEvent::Started {
+                model: output.model.clone(),
+            },
+            RuntimeStreamEvent::TextDelta {
+                text: first.to_string(),
+            },
+            RuntimeStreamEvent::TextDelta {
+                text: second.to_string(),
+            },
+            RuntimeStreamEvent::Completed { output },
+        ])
+    }
 }
 
 /// The router decision core returns before runtime execution.
@@ -409,6 +452,14 @@ impl RouteTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionResult {
     pub output: RuntimeOutput,
+    pub routing: RoutingDecision,
+    pub trace: Vec<TraceEvent>,
+}
+
+/// Observable streaming execution with normalized runtime events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamExecutionResult {
+    pub events: Vec<RuntimeStreamEvent>,
     pub routing: RoutingDecision,
     pub trace: Vec<TraceEvent>,
 }
@@ -507,6 +558,49 @@ pub fn execute_with_adapters(
 
     Ok(ExecutionResult {
         output,
+        routing,
+        trace,
+    })
+}
+
+/// Route and stream a normalized request through the portable runtime contract.
+pub fn stream_with_adapters(
+    config: &SecedaConfig,
+    request: &ChatRequest,
+    adapters: &[&dyn RuntimeAdapter],
+) -> Result<StreamExecutionResult, CoreError> {
+    config.validate()?;
+
+    let mut trace = vec![TraceEvent::new(
+        TraceEventKind::RequestNormalized,
+        format!("normalized {} message(s)", request.messages.len()),
+    )];
+
+    let routing = route_request(config, request)?;
+    trace.push(TraceEvent::new(
+        TraceEventKind::RoutingDecided,
+        format!("selected runtime {}", routing.runtime_id),
+    ));
+
+    let adapter = adapters
+        .iter()
+        .copied()
+        .find(|adapter| adapter.capabilities().runtime_id == routing.runtime_id)
+        .ok_or_else(|| CoreError::NoAdapterForRuntime(routing.runtime_id.clone()))?;
+
+    trace.push(TraceEvent::new(
+        TraceEventKind::RuntimeSelected,
+        format!("backend {:?}", routing.backend),
+    ));
+
+    let events = adapter.execute_stream(request)?;
+    trace.push(TraceEvent::new(
+        TraceEventKind::RuntimeCompleted,
+        format!("stream_events {}", events.len()),
+    ));
+
+    Ok(StreamExecutionResult {
+        events,
         routing,
         trace,
     })
@@ -965,6 +1059,41 @@ mod tests {
                 TraceEventKind::RuntimeCompleted,
             ]
         );
+    }
+
+    #[test]
+    fn core_streams_normalized_runtime_events() {
+        let mut config = SecedaConfig::default();
+        config.router.default_local_runtime_id = "mock-local".to_string();
+        config.router.default_cloud_runtime_id = "mock-cloud".to_string();
+        config.runtimes = vec![
+            RuntimeConfig::new("mock-local", BackendKind::Local, true),
+            RuntimeConfig::new("mock-cloud", BackendKind::Cloud, true),
+        ];
+        let local = MockRuntimeAdapter::new("mock-local", BackendKind::Local);
+        let cloud = MockRuntimeAdapter::new("mock-cloud", BackendKind::Cloud);
+        let request = ChatRequest::new("seceda/default", vec![ChatMessage::user("hello")]);
+
+        let result =
+            stream_with_adapters(&config, &request, &[&local, &cloud]).expect("core stream");
+
+        assert_eq!(result.routing.runtime_id, "mock-local");
+        assert!(matches!(
+            result.events.first(),
+            Some(RuntimeStreamEvent::Started { model }) if model == "seceda/default"
+        ));
+        assert_eq!(
+            result
+                .events
+                .iter()
+                .filter(|event| matches!(event, RuntimeStreamEvent::TextDelta { .. }))
+                .count(),
+            2
+        );
+        assert!(matches!(
+            result.events.last(),
+            Some(RuntimeStreamEvent::Completed { output }) if output.text == "mock-local response: hello"
+        ));
     }
 
     #[test]
