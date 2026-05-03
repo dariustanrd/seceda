@@ -3,6 +3,7 @@ members = [
     "crates/seceda-core",
     "crates/seceda-server",
     "crates/seceda-llama",
+    "crates/seceda-cloud-providers",
     "crates/seceda-cli",
 ]
 resolver = "2"
@@ -15,4 +16,3 @@ repository = "https://github.com/dariustanrd/seceda"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
-

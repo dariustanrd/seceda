@@ -10,6 +10,8 @@ The root `Cargo.toml` defines these workspace members:
 - `crates/seceda-core`: shared request, model, and routing contracts.
 - `crates/seceda-server`: localhost OpenAI-compatible server boundary.
 - `crates/seceda-llama`: `llama.cpp` runtime integration scaffold.
+- `crates/seceda-cloud-providers`: cloud provider runtime registry and
+  provider-specific cloud adapter home.
 - `crates/seceda-cli`: `seceda` CLI entrypoint.
 
 `seceda-core` currently owns the portable tracer path: typed config defaults and
@@ -79,11 +81,23 @@ existing endpoint first; and `/health` plus `/admin/llama-sidecar` report
 whether the sidecar is not configured, already running, launched, failed to
 launch, or stopped.
 
+Cloud provider runtime details live under `crates/seceda-cloud-providers`.
+The cloud provider family exposes provider descriptors, runtime identifiers,
+model hints, and capability metadata while keeping provider-specific transport
+and auth details outside `seceda-core`. The intended layout is:
+
+- `crates/seceda-cloud-providers/seceda-codex-subscription`: ChatGPT/Codex
+  subscription cloud fallback adapter.
+- `seceda_cloud/`: preserved Python Modal/vLLM cloud runtime package.
+- future cloud providers, such as OpenRouter, should be added as provider
+  modules or child crates under the same cloud-provider family.
+
 
 ## Preserved Cloud Package
 
 `seceda_cloud/` remains the standalone Python package for Modal and vLLM cloud
-runtime work.
+runtime work, and is represented by the `remote/modal-default` cloud provider
+descriptor in the Rust workspace.
 
 From the repo root:
 
