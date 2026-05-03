@@ -12,6 +12,17 @@ The root `Cargo.toml` defines these workspace members:
 - `crates/seceda-llama`: `llama.cpp` runtime integration scaffold.
 - `crates/seceda-cli`: `seceda` CLI entrypoint.
 
+`seceda-core` currently owns the portable tracer path: typed config defaults and
+validation, runtime capability metadata, a runtime adapter trait, a deterministic
+mock runtime, routing decisions, and observable execution results.
+
+The initial router behavior is intentionally small:
+
+- `local/default` forces the configured local runtime.
+- `remote/default` forces the configured cloud runtime.
+- `seceda/default` uses keyword routing to choose cloud for configured cloud
+  keywords, otherwise it chooses the configured local runtime.
+
 Run the minimal Rust checks from the repo root:
 
 ```bash
@@ -68,4 +79,3 @@ SECEDA_TUI_CATALOG_PATH=seceda_edge/config/config_catalog.toml
 
 The config path defaults still point at the intended edge config location, even
 though this transitional Rust scaffold has not recreated that config package.
-

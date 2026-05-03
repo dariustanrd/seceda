@@ -19,7 +19,7 @@ The near-term product direction has shifted from a Seceda-specific inference API
 
 The current repository has been reconciled around a Rust-first scaffold. The visible first-class areas are:
 
-- `crates/seceda-core/`: shared Rust request, model, and routing contracts.
+- `crates/seceda-core/`: shared Rust request, model, routing, runtime adapter, config, and trace contracts.
 - `crates/seceda-server/`: Rust server boundary scaffold for the localhost OpenAI-compatible API.
 - `crates/seceda-llama/`: Rust `llama.cpp` runtime integration scaffold.
 - `crates/seceda-cli/`: Rust CLI entrypoint.
@@ -29,6 +29,12 @@ The current repository has been reconciled around a Rust-first scaffold. The vis
 - top-level `README.md`, `pyproject.toml`, `uv.lock`, and `skills-lock.json`.
 
 The root `pyproject.toml` now keeps only the existing Python cloud package in the `uv` workspace. Rust workspace membership is managed by the root `Cargo.toml`.
+
+`seceda-core` now includes the first portable tracer path. It validates typed
+configuration, routes a normalized request to a configured runtime, executes it
+through a runtime adapter trait, and returns normalized output plus internal
+trace events. The first adapter is a deterministic mock runtime for proving the
+contract before server, llama.cpp, Modal, or mobile SDK dependencies are added.
 
 ## Product Objective
 
