@@ -8,6 +8,8 @@ description = "Cloud provider runtime registry and layout for Seceda."
 
 [dependencies]
 seceda-core = { path = "../seceda-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [lints]
 workspace = true

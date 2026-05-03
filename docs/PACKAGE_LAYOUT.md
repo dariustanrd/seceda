@@ -92,6 +92,12 @@ and auth details outside `seceda-core`. The intended layout is:
 - future cloud providers, such as OpenRouter, should be added as provider
   modules or child crates under the same cloud-provider family.
 
+Seceda-owned cloud credentials live under `~/.seceda` by default. The
+`SECEDA_HOME` environment variable can point at another state directory for
+tests, development, or packaged desktop builds. Codex Subscription credentials
+are stored separately from `~/.codex/auth.json` so Seceda does not mutate the
+user native Codex CLI login.
+
 
 ## Preserved Cloud Package
 
